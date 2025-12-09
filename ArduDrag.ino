@@ -4,6 +4,7 @@
 #include <string>
 
 #include "KalmanFilter.h"
+#include "DragFSM.h"
 
 //============================================================================================
 // HELPER FUNCTIONS
@@ -40,13 +41,19 @@ static const std::vector<std::string> GpsFixQuality{"invalid", "SPS", "DGPS", "P
 
 void setupGPS()
 {
-  // SerialGPS.begin(9600);
-  // delay(500);
+  // Having issues reliably connecting to GPS
+  bool initConnectWithDefaultBaud = true;
+  if( initConnectWithDefaultBaud )
+  {
+    // defualt GPS baud rate is 9600
+    SerialGPS.begin(9600);
+    delay(500);
 
-  // // Change to higher baud rate for robustness using 2 NMEA messages.
-  // GPS.sendCommand(PMTK_SET_BAUD_57600);
-  // SerialGPS.end();
-  // delay(200);  
+    // Change GPS to 57600 baud rate for robustness using 2 NMEA messages.
+    GPS.sendCommand(PMTK_SET_BAUD_57600);
+    SerialGPS.end();
+    delay(500);  
+  }
   SerialGPS.begin(57600);
   delay(500);
 
@@ -230,6 +237,15 @@ float computeSigmaP(int fixQuality, int sats, float hdop)
     return base * satFactor * hdopFactor;
 }
 
+// Min measureable speed from GPS based on number of satellites
+// 0.5 mps = 1.12 mph
+float minSpeedBasedonSatellites(unsigned int numSat)
+{
+  if( numSat <= 6)      return 1.0f;
+  else if( (numSat > 6) && (numSat <= 9) ) return 0.5f;
+  else                 return 0.2f;
+}
+
 
 //============================================================================================
 //============================================================================================
@@ -276,16 +292,17 @@ uint32_t _timePrint_ms   = millis();
 bool _isFirstTime = true;
 bool _haveGpsFixInfo = true;
 bool _enableKF = false;
-bool _gpsDataUnusable = true;
+bool _gpsDataGood = false;
 
-double lat0;
-double lon0;
+double _lat0;
+double _lon0;
 float sigma_p_smoothed = 2.0f;
 
-float gpsSpdThresh_mps = 1.0f; // 0.5 mps = 1.12 mph
 float gpsSpdMax_mps = 0.0f;
 
 unsigned int minSatellites = 6;
+
+DragTimingFSM _dragFSM(&Serial);
 
 bool DEBUG = true;
 bool DEBUG2 = true;
@@ -332,7 +349,7 @@ void loop()
       // Check for sufficient quality of GPS data
       if( GPS.satellites < minSatellites )
       {
-        _gpsDataUnusable = true;
+        _gpsDataGood = false;
         if(DEBUG2) Serial.print("***** Insufficent Satellites! Require at least ");
         Serial.print(minSatellites);
         Serial.print(" but only have ");
@@ -342,7 +359,7 @@ void loop()
       }
       else
       {
-        _gpsDataUnusable = false;
+        _gpsDataGood = true;
       }
 
 
@@ -368,8 +385,8 @@ void loop()
         _enableKF = true;
 
         // current GPS location
-        lat0 = GPS.latitudeDegrees;
-        lon0 = GPS.longitudeDegrees;
+        _lat0 = GPS.latitudeDegrees;
+        _lon0 = GPS.longitudeDegrees;
 
         // Kalman Filter Init
         float p0 = 0.0f;
@@ -385,7 +402,7 @@ void loop()
 
       //------------------------------------------------------------
       // compute change in linear distance from GPS measurements
-      float gpsDist_m = haversineDistance_m(lat0, lon0, GPS.latitudeDegrees, GPS.longitudeDegrees);
+      float gpsDist_m = haversineDistance_m(_lat0, _lon0, GPS.latitudeDegrees, GPS.longitudeDegrees);
       float gpsSpd_mps = GPS.speed * KNTS2MPS;      
       if(DEBUG2) Serial.print("gpsDist_m = "); Serial.println(gpsDist_m);
       if(DEBUG2) Serial.print("gpsSpd_mps = "); Serial.println(gpsSpd_mps);
@@ -398,7 +415,7 @@ void loop()
       if(DEBUG2) Serial.print("gpsSpdMax_mps = "); Serial.println(gpsSpdMax_mps);
 
       // deadband for practical GPS speed (it never goes to zero with real GPS measurements)
-      if( gpsSpd_mps < gpsSpdThresh_mps )
+      if( gpsSpd_mps < minSpeedBasedonSatellites(GPS.satellites) )
       {
         gpsSpd_mps = 0.0f;
       }
@@ -435,7 +452,7 @@ void loop()
       if(DEBUG2) Serial.println("=== Process Loop ==="); 
       _timeProcess_ms  = _time_ms;
 
-      // if( _gpsDataUnusable )
+      // if( _gpsDataGood )
 
       //------------------------------------------------------------
       // Only run if KF has been initialized with the a GPS message
@@ -470,12 +487,26 @@ void loop()
         _dragState.heading_deg = angleWrap_deg(GPS.angle);
         _dragState.distance_m  = distKF;
         _dragState.speed_mps   = spdKF;
-
-
+      
         //--------------------------------------------------------
-        // Run the drag logic
-        // if( _gpsDataUnusable )
-        // updateDragTiming(_dragState, dt_sec);
+        // Run the Drag FSM logic
+        _dragFSM.update(_time_ms, _gpsDataGood, spdKF, distKF);
+
+        // If FSM switches from DRAG_ARMED to DRAG_RUNNING
+        if (_dragFSM.consumeKalmanResetRequest())
+        {
+          if(DEBUG2) Serial.println("*** FSM switched from DRAG_ARMED to DRAG_RUNNINGR ***");
+
+          // reset GPS origin
+          _lat0 = GPS.latitudeDegrees;
+          _lon0 = GPS.longitudeDegrees;
+
+          // reset the KF to start at 0.0
+          float p0 = 0.0f;
+          float v0 = 0.0f;
+          float sigma_v = 0.2f;
+          _kf.init(_kfRate_sec, p0, v0, sigma_p_smoothed, sigma_v);
+        }
 
       } // if( _enableKF )  
     } // if( _time_ms - _timeProcess_ms > _processPeriod_ms )
