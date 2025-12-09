@@ -1,22 +1,52 @@
 /*
- * Simple 1D Kalman filter for a vehicle:
- *   State x = [ position; velocity; acceleration ]
- *   Measurement z = [ position; velocity ]
+ * 1D Kalman filter for ground vehicle distance-from-start tracking.
  *
- * Call predict() regularly with the ACTUAL elapsed time (dt in seconds)
- * between the last state update and "now".
+ * This filter estimates a physically consistent kinematic state using a
+ * constant-acceleration model with jerk-driven process noise:
  *
- * Call update(z_pos, z_vel) whenever a new measurement arrives (10 Hz).
+ *   State vector:
+ *     x = [ p; v; a ]
+ *       p = position / distance from start (m)
+ *       v = velocity / speed (m/s)
+ *       a = acceleration (m/s^2)
  *
- * This code avoids dynamic allocation and uses fixed-size arrays, suitable
- * for small MCUs (e.g., Arduino).
+ *   Measurement vector (when available):
+ *     z = [ p_meas; v_meas ]
+ *       typically from GPS-derived distance-from-start and a speed source.
  *
- * Enhancements added:
- *  - Robust 2x2 inversion using epsilon check (no exact det==0 comparison).
- *  - dt sanity checks/clamping to reduce instability on timing stalls.
- *  - Jerk-based, dt-scaled process noise Q for the constant-acceleration model.
- *  - Covariance symmetrization after update to reduce numeric drift.
- *  - Declarations moved to top of functions for portability.
+ * The filter runs in two steps:
+ *   1) predict(dt):
+ *      Propagates state and covariance forward by the actual elapsed time dt
+ *      (seconds). The state transition A(dt) implements standard kinematics:
+ *        p += v*dt + 0.5*a*dt^2
+ *        v += a*dt
+ *        a stays constant over the interval
+ *
+ *      Process noise Q(dt) is recomputed every predict using a white-jerk model
+ *      (jerk = da/dt). The tuning parameter sigma_j (m/s^3) controls how
+ *      quickly acceleration is allowed to change:
+ *        higher sigma_j -> more responsive, noisier accel estimate
+ *        lower sigma_j  -> smoother, more model-trusting behavior
+ *
+ *   2) update(z_pos, z_vel):
+ *      Incorporates position and velocity measurements via:
+ *        H maps state to measurements (p and v)
+ *        R is measurement noise covariance
+ *
+ * Key matrices:
+ *   A (3x3): state transition, rebuilt from dt each predict
+ *   H (2x3): measurement model for [p, v]
+ *   Q (3x3): process noise covariance from sigma_j and dt
+ *   R (2x2): measurement noise covariance set from sensor std devs
+ *   P (3x3): state estimate covariance
+ *
+ * Intended usage:
+ *   - Call init(dt_nominal) once.
+ *   - Call predict(dt_actual) at your preferred estimate rate (e.g., 20 Hz).
+ *   - Call update() whenever new measurements arrive (e.g., ~10 Hz with jitter).
+ *
+ * This implementation avoids dynamic allocation and uses fixed-size arrays,
+ * making it suitable for small MCUs such as Arduino.
  */
 
 #include <Arduino.h>
@@ -37,8 +67,12 @@ public:
 
     // Initialize filter parameters and state
     // dt_nominal is the design / nominal sample time (e.g., 0.05 for 20 Hz).
-    // The actual dt passed to predict() can vary around this.
-    void init(float dt_nominal_in)
+    //   --> The actual dt passed to predict() can vary around this.
+    // Initial state: p0 (poistion) and v0 (velocity)
+    // Uncertainty in state: std dev (sigma) for each state (pos and vel)
+    void init(float dt_nominal_in, 
+              float p0, float v0,
+              float sigma_p0, float sigma_v0)
     {
         float dt2;
 
@@ -94,15 +128,15 @@ public:
             R[1][0] = 0.0f;               R[1][1] = sigma_v * sigma_v;
         }
 
-        // Initialize state (start from rest at position 0, acceleration 0)
-        x[0] = 0.0f;  // position
-        x[1] = 0.0f;  // velocity
-        x[2] = 0.0f;  // acceleration
+        // Initialize state
+        x[0] = p0;  // position
+        x[1] = v0;  // velocity
+        x[2] = 0;   // acceleration
 
-        // Initialize covariance P with large uncertainty
-        P[0][0] = 10.0f;  P[0][1] = 0.0f;   P[0][2] = 0.0f;
-        P[1][0] = 0.0f;   P[1][1] = 10.0f;  P[1][2] = 0.0f;
-        P[2][0] = 0.0f;   P[2][1] = 0.0f;   P[2][2] = 10.0f;
+        // Initialize covariance P with variance = sigma^2
+        P[0][0] = sigma_p0*sigma_p0; P[0][1] = 0.0f;              P[0][2] = 0.0f;
+        P[1][0] = 0.0f;              P[1][1] = sigma_v0*sigma_v0; P[1][2] = 0.0f;
+        P[2][0] = 0.0f;              P[2][1] = 0.0f;              P[2][2] = 10.0f;
     }
 
     // Prediction step: x_k|k-1 = A(dt) x_{k-1|k-1}, P_k|k-1 = A(dt) P A(dt)^T + Q
@@ -364,8 +398,8 @@ public:
 
 private:
     float EPS = 1e-9f; // epsilon near zero
-
-    float dt_nominal; // nominal sample time used for initial tuning (seconds)
+    float dt_nominal = 0.05; // nominal sample time used for initial tuning (seconds)
+    float sigma_j; // Jerk noise std dev for process model (not measurements!)
 
     // State transition matrix A (3x3)
     // NOTE: A is updated inside predict() based on the actual dt used.
@@ -377,23 +411,15 @@ private:
 
     // Process noise covariance Q (3x3)
     //
-    // Enhanced model:
-    // We now assume "jerk" (time-derivative of acceleration) is white noise.
-    // For state [p, v, a], the discrete-time Q derived from white jerk with
-    // variance sigma_j^2 is:
+    // We assume "jerk" (time-derivative of acceleration) is white noise.
+    // For state [p, v, a], the discrete-time Q derived from white jerk with variance sigma_j^2 is:
     //
-    //   Q = sigma_j^2 * [
-    //        dt^5/20, dt^4/8,  dt^3/6
-    //        dt^4/8,  dt^3/3,  dt^2/2
-    //        dt^3/6,  dt^2/2,  dt
-    //      ]
+    //   Q = sigma_j^2 * [dt^5/20, dt^4/8,  dt^3/6
+    //                    dt^4/8,  dt^3/3,  dt^2/2
+    //                    dt^3/6,  dt^2/2,  dt]
     //
     // This Q is recomputed each predict step using the actual dt.
     float Q[3][3];
-
-    // Jerk noise standard deviation (tuning parameter).
-    // Larger values -> filter trusts model less and measurements more.
-    float sigma_j;
 
     // Measurement noise covariance R (2x2)
     float R[2][2];
