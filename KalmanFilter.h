@@ -347,9 +347,16 @@ public:
     const float* state() const { return x; }
     const float (*covariance() const)[3] { return P; }
 
-    // Allow tuning updates post-init if needed.
-    void setSigmaJ(float sj) { sigma_j = sj; }
-    void setR(float sigma_p, float sigma_v)
+    // Sets jerk noise std dev (m/s^3).
+    //   Higher -> more responsive to accel changes
+    //   Lower -> smoother/more model-trusting (more filtering)
+    void setSigmaJ(float sj = 0.45f) // 0.4f to 2.0f
+    { sigma_j = sj; }
+
+    // Sets measurement noise *std devs* for position (m) and velocity (m/s).
+    //   Higher -> trust measurements less (more filtering) 
+    //   Lower -> trust measurements more
+    void setR(float sigma_p=1.0f, float sigma_v=0.2f)
     {
         R[0][0] = sigma_p * sigma_p;   R[0][1] = 0.0f;
         R[1][0] = 0.0f;               R[1][1] = sigma_v * sigma_v;
