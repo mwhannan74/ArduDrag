@@ -1,309 +1,263 @@
-// namespace dragFSM {
+#pragma once
+/**
+ * Drag timing finite state machine for 0–60 mph and 1/4 mile performance measurement.
+ *
+ * This class implements a GPS-based drag timing state machine intended for Arduino projects.
+ * It detects a valid “staged” condition (vehicle stopped with a valid GPS fix), arms itself,
+ * then detects launch based on speed thresholds. Once a run is in progress, it measures:
+ *
+ *   1) 0–60 mph elapsed time (ET)
+ *   2) 1/4 mile ET using two distance estimation methods:
+ *        - Integrated distance from speed via trapezoidal integration
+ *        - Direct start-to-current displacement via haversine distance
+ *
+ * The class also tracks:
+ *   - Max speed during the run
+ *   - Speed at the 0–60 threshold crossing
+ *   - Speed at the 1/4 mile completion event
+ *
+ * Run lifecycle:
+ *   - DRAG_WAIT_FOR_STOP: Waits for the vehicle to remain below the stop threshold for a
+ *     minimum duration while GPS fix is valid.
+ *   - DRAG_ARMED: Armed state; waits for speed to exceed the launch threshold.
+ *   - DRAG_RUNNING: Integrates distance, checks 0–60 and 1/4 mile completion.
+ *   - DRAG_FINISHED: Prints a single-line summary and waits for the vehicle to stop again,
+ *     then auto-resets for the next run.
+ *
+ * Safety/robustness behaviors:
+ *   - If GPS fix is lost during DRAG_RUNNING, the run is aborted and the FSM resets.
+ *   - If the vehicle slows below the stop threshold for longer than the abort timeout
+ *     before completing the 1/4 mile, the run is aborted and the FSM resets.
+ *
+ * Required external inputs:
+ *   - A valid GPS fix boolean provided to update().
+ *   - A Pose struct provided to update() containing:
+ *       time_sec, lat_deg, lon_deg, speed_mps.
+ *   - A haversineDistance_m() implementation.
+ *
+ * Time base assumptions:
+ *   - pose.time_sec should be monotonic and consistent with dt_sec.
+ *     If your system cannot guarantee this, consider deriving time from millis()
+ *     or adapting the class accordingly.
+ *
+ * Debug/logging:
+ *   - By default, output is written to Serial, but begin(Stream&) allows redirection.
+ *   - The run summary is printed in a stable, comma-delimited format intended for
+ *     easy parsing by external logging or telemetry tools.
+ */
+class DragTimingFSM
+{
+public:
+  //==========================================================================================
+  // Public types
+  //==========================================================================================
 
-// //============================================================================================
-// // DRAG TIMING STATE MACHINE (0-60 mph and 1/4 mile)
-// //============================================================================================
+  // Drag run states
+  enum DragState
+  {
+    DRAG_WAIT_FOR_STOP = 0,   // waiting for vehicle to be fully stopped with GPS fix
+    DRAG_ARMED         = 1,   // stopped and GPS OK, waiting for launch
+    DRAG_RUNNING       = 2,   // run in progress
+    DRAG_FINISHED      = 3    // run complete, waiting for reset
+  };
 
-// // Distance for 1/4 mile in meters
-// static const float QUARTER_MILE_M = 402.336;
+  // Pose input required by this FSM
+  struct Pose
+  {
+    float time_sec  = 0.0f;  // monotonic time in seconds
+    float lat_deg   = 0.0f;
+    float lon_deg   = 0.0f;
+    float speed_mps = 0.0f;
+  };
 
-// // Speed thresholds (m/s)
-// static const float SPEED_STOP_THRESHOLD_MPS  = 0.5f; // below this ~ stopped (~1.1 mph)
-// static const float SPEED_START_THRESHOLD_MPS = 1.0f; // above this = run starts (~2.2 mph)
-// static const float TARGET_60_MPH             = 60.0f;
-// static const float TARGET_60_MPS             = TARGET_60_MPH / MPS2MPH;
+  // Results / internal bookkeeping
+  struct DragTiming
+  {
+    DragState state = DRAG_WAIT_FOR_STOP;
 
-// // Timing thresholds (ms)
-// static const uint32_t MIN_STOP_TIME_MS   = 2000; // must be stopped this long to arm
-// static const uint32_t ABORT_STOP_TIME_MS = 2000; // slowed too long -> abort
+    // Run bookkeeping
+    float startTime_sec          = 0.0f;
+    float distance_integrated_m  = 0.0f;
+    float distance_haversine_m   = 0.0f;
+    float startLat_deg           = 0.0f;
+    float startLon_deg           = 0.0f;
+    float lastSpeed_mps          = 0.0f;
+    float maxSpeed_mps           = 0.0f;
 
-// // Drag run states
-// enum DragState
-// {
-//   DRAG_WAIT_FOR_STOP = 0,   // waiting for vehicle to be fully stopped with GPS fix
-//   DRAG_ARMED         = 1,   // stopped and GPS OK, waiting for launch
-//   DRAG_RUNNING       = 2,   // run in progress
-//   DRAG_FINISHED      = 3    // run complete, waiting for reset
-// };
+    // 0-60 mph results
+    bool  has_0_60     = false;
+    float t_0_60_sec   = 0.0f;
+    float v_0_60_mps   = 0.0f;
 
-// struct DragTiming
-// {
-//   DragState state = DRAG_WAIT_FOR_STOP;
+    // 1/4 mile results (two distance methods)
+    bool  has_quarter        = false;
+    float t_quarter_int_sec  = 0.0f; // using integrated speed distance
+    float t_quarter_hav_sec  = 0.0f; // using haversine distance
+    float v_quarter_mps      = 0.0f;
 
-//   // Run bookkeeping
-//   float startTime_sec = 0.0f;
-//   float distance_integrated_m = 0.0f;
-//   float distance_haversine_m = 0.0f;
-//   float startLat_deg = 0.0f;
-//   float startLon_deg = 0.0f;
-//   float lastSpeed_mps = 0.0f;
-//   float maxSpeed_mps = 0.0f;
+    // stop detection timer (for arming and abort/reset)
+    uint32_t stopStart_ms    = 0;
+    bool     stopTimerRunning = false;
+  };
 
-//   // 0-60 mph results
-//   bool  has_0_60 = false;
-//   float t_0_60_sec = 0.0f;
-//   float v_0_60_mps = 0.0f;
+  //==========================================================================================
+  // Construction / setup
+  //==========================================================================================
 
-//   // 1/4 mile results (two distance methods)
-//   bool  has_quarter = false;
-//   float t_quarter_int_sec = 0.0f; // using integrated speed distance
-//   float t_quarter_hav_sec = 0.0f; // using haversine distance
-//   float v_quarter_mps = 0.0f;
+  DragTimingFSM() = default;
 
-//   // stop detection timer (for arming and abort/reset)
-//   uint32_t stopStart_ms = 0;
-//   bool     stopTimerRunning = false;
+  // Optional: route debug output somewhere other than Serial
+  void begin(Stream& debugStream = Serial)
+  {
+    _dbg = &debugStream;
+    reset();
+  }
 
-// } _drag;
+  //==========================================================================================
+  // Configuration setters (optional)
+  //==========================================================================================
 
+  void setStopThresholdMps(float v)   { _speedStopThreshold_mps = v; }
+  void setStartThresholdMps(float v)  { _speedStartThreshold_mps = v; }
+  void setMinStopTimeMs(uint32_t ms)  { _minStopTime_ms = ms; }
+  void setAbortStopTimeMs(uint32_t ms){ _abortStopTime_ms = ms; }
 
-// // Haversine distance between two lat/lon points in meters
-// float haversineDistance_m(float lat1_deg, float lon1_deg, float lat2_deg, float lon2_deg)
-// {
-//   const float R = 6371000.0f; // Earth radius in meters
+  //==========================================================================================
+  // Core API
+  //==========================================================================================
 
-//   float phi1 = lat1_deg * D2R;
-//   float phi2 = lat2_deg * D2R;
-//   float dphi = (lat2_deg - lat1_deg) * D2R;
-//   float dlambda = (lon2_deg - lon1_deg) * D2R;
+  // Reset state machine to initial state.
+  void reset()
+  {
+    _drag.state = DRAG_WAIT_FOR_STOP;
 
-//   float sin_dphi_2    = sin(dphi * 0.5f);
-//   float sin_dlambda_2 = sin(dlambda * 0.5f);
+    _drag.startTime_sec = 0.0f;
+    _drag.distance_integrated_m = 0.0f;
+    _drag.distance_haversine_m = 0.0f;
+    _drag.startLat_deg = 0.0f;
+    _drag.startLon_deg = 0.0f;
+    _drag.lastSpeed_mps = 0.0f;
+    _drag.maxSpeed_mps = 0.0f;
 
-//   float a = sin_dphi_2 * sin_dphi_2 +
-//             cos(phi1) * cos(phi2) * sin_dlambda_2 * sin_dlambda_2;
+    _drag.has_0_60 = false;
+    _drag.t_0_60_sec = 0.0f;
+    _drag.v_0_60_mps = 0.0f;
 
-//   float c = 2.0f * atan2(sqrt(a), sqrt(1.0f - a));
-//   float d = R * c;
+    _drag.has_quarter = false;
+    _drag.t_quarter_int_sec = 0.0f;
+    _drag.t_quarter_hav_sec = 0.0f;
+    _drag.v_quarter_mps = 0.0f;
 
-//   return d;
-// }
+    _drag.stopStart_ms = 0;
+    _drag.stopTimerRunning = false;
 
-// void resetDragState()
-// {
-//   _drag.state = DRAG_WAIT_FOR_STOP;
+    logln(F("DRAG: Reset, waiting for stop."));
+  }
 
-//   _drag.startTime_sec = 0.0f;
-//   _drag.distance_integrated_m = 0.0f;
-//   _drag.distance_haversine_m = 0.0f;
-//   _drag.startLat_deg = 0.0f;
-//   _drag.startLon_deg = 0.0f;
-//   _drag.lastSpeed_mps = 0.0f;
-//   _drag.maxSpeed_mps = 0.0f;
+  // Main drag-timing state machine update
+  // dt_sec is the time since the last update
+  //
+  // REQUIRED INPUTS:
+  // - gpsFixValid: true if you have a valid GPS fix
+  // - pose:        current fused pose data
+  //
+  // MISSING (external dependency):
+  // - A correct monotonic pose.time_sec source.
+  //
+  void update(float dt_sec, bool gpsFixValid, const Pose& pose)
+  {
+    // Require a valid GPS fix for all run logic
+    if (!gpsFixValid)
+    {
+      // If we lose GPS fix while running, safest is to abort and reset
+      if (_drag.state == DRAG_RUNNING)
+      {
+        logln(F("DRAG: GPS fix lost, aborting run."));
+        reset();
+      }
+      return;
+    }
 
-//   _drag.has_0_60 = false;
-//   _drag.t_0_60_sec = 0.0f;
-//   _drag.v_0_60_mps = 0.0f;
+    const float speed_mps = pose.speed_mps;
+    const float speed_mph = speed_mps * MPS2MPH;
 
-//   _drag.has_quarter = false;
-//   _drag.t_quarter_int_sec = 0.0f;
-//   _drag.t_quarter_hav_sec = 0.0f;
-//   _drag.v_quarter_mps = 0.0f;
+    switch (_drag.state)
+    {
+      case DRAG_WAIT_FOR_STOP:
+      {
+        if (updateStopTimer(speed_mps, _minStopTime_ms))
+        {
+          _drag.state = DRAG_ARMED;
+          logln(F("DRAG: Armed (vehicle stopped, GPS fix OK)."));
+        }
+        break;
+      }
 
-//   _drag.stopStart_ms = 0;
-//   _drag.stopTimerRunning = false;
+      case DRAG_ARMED:
+      {
+        if (speed_mps < _speedStopThreshold_mps)
+        {
+          // stay armed
+        }
+        else if (speed_mps >= _speedStartThreshold_mps)
+        {
+          // Launch detected -> start run
+          _drag.state = DRAG_RUNNING;
 
-//   Serial.println("DRAG: Reset, waiting for stop.");
-// }
+          _drag.startTime_sec = pose.time_sec;
+          _drag.startLat_deg  = pose.lat_deg;
+          _drag.startLon_deg  = pose.lon_deg;
+          _drag.lastSpeed_mps = speed_mps;
+          _drag.maxSpeed_mps  = speed_mps;
 
-// // Print final run summary in a single line for easy parsing
-// void printDragRunSummary()
-// {
-//   Serial.println("DRAG: Run complete.");
-//   Serial.print("DRAG_RESULT, ");
-//   Serial.print("t_start=");           Serial.print(_drag.startTime_sec, 3);
-//   Serial.print(", t_0_60=");          Serial.print(_drag.has_0_60 ? _drag.t_0_60_sec : -1.0f, 3);
-//   Serial.print(", t_quarter_int=");   Serial.print(_drag.t_quarter_int_sec, 3);
-//   Serial.print(", t_quarter_hav=");   Serial.print(_drag.t_quarter_hav_sec, 3);
-//   Serial.print(", v_0_60_mph=");
-//   Serial.print(_drag.has_0_60 ? _drag.v_0_60_mps * MPS2MPH : 0.0f, 2);
-//   Serial.print(", v_quarter_mph=");
-//   Serial.print(_drag.v_quarter_mps * MPS2MPH, 2);
-//   Serial.print(", dist_int_m=");
-//   Serial.print(_drag.distance_integrated_m, 2);
-//   Serial.print(", dist_hav_m=");
-//   Serial.print(_drag.distance_haversine_m, 2);
-//   Serial.print(", maxSpeed_mph=");
-//   Serial.print(_drag.maxSpeed_mps * MPS2MPH, 2);
-//   Serial.println("");
-// }
+          _drag.distance_integrated_m = 0.0f;
+          _drag.distance_haversine_m  = 0.0f;
 
-// // Main drag-timing state machine update
-// // dt_sec is the time since the last fusion update
-// void updateDragTiming(float dt_sec)
-// {
-//   // Require a valid GPS fix for all run logic
-//   if( !GPS.fix )
-//   {
-//     // If we lose GPS fix while running, safest is to abort and reset
-//     if( _drag.state == DRAG_RUNNING )
-//     {
-//       Serial.println("DRAG: GPS fix lost, aborting run.");
-//       resetDragState();
-//     }
-//     return;
-//   }
+          _drag.has_0_60    = false;
+          _drag.has_quarter = false;
 
-//   float speed_mps = _pose.speed_mps;
-//   float speed_mph = speed_mps * MPS2MPH;
+          _drag.stopTimerRunning = false;
 
-//   // Generic stop-detection helper (used in several states)
-//   auto updateStopTimer = [&](uint32_t timeout_ms) -> bool
-//   {
-//     if( speed_mps < SPEED_STOP_THRESHOLD_MPS )
-//     {
-//       if( !_drag.stopTimerRunning )
-//       {
-//         _drag.stopTimerRunning = true;
-//         _drag.stopStart_ms = millis();
-//       }
-//       else
-//       {
-//         if( millis() - _drag.stopStart_ms > timeout_ms )
-//         {
-//           _drag.stopTimerRunning = false;
-//           return true; // timeout reached
-//         }
-//       }
-//     }
-//     else
-//     {
-//       _drag.stopTimerRunning = false;
-//     }
-//     return false;
-//   };
+          log(F("DRAG: Run started at t = "));
+          logFloat(_drag.startTime_sec, 3);
+          log(F(" s, speed = "));
+          logFloat(speed_mph, 2);
+          logln(F(" mph."));
+        }
+        else
+        {
+          // small creep, but not enough to start; stay in ARMED
+        }
+        break;
+      }
 
-//   switch( _drag.state )
-//   {
-//     case DRAG_WAIT_FOR_STOP:
-//     {
-//       // Wait until the vehicle is stopped for a bit with a valid fix
-//       if( updateStopTimer(MIN_STOP_TIME_MS) )
-//       {
-//         _drag.state = DRAG_ARMED;
-//         Serial.println("DRAG: Armed (vehicle stopped, GPS fix OK).");
-//       }
-//       break;
-//     }
+      case DRAG_RUNNING:
+      {
+        // Track max speed for info
+        if (speed_mps > _drag.maxSpeed_mps)
+        {
+          _drag.maxSpeed_mps = speed_mps;
+        }
 
-//     case DRAG_ARMED:
-//     {
-//       // Still require vehicle to remain near-stopped until launch
-//       if( speed_mps < SPEED_STOP_THRESHOLD_MPS )
-//       {
-//         // stay armed
-//       }
-//       else if( speed_mps >= SPEED_START_THRESHOLD_MPS )
-//       {
-//         // Launch detected -> start run
-//         _drag.state = DRAG_RUNNING;
+        // 1) Distance from integrated speed (trapezoidal integration)
+        const float v_prev = _drag.lastSpeed_mps;
+        const float v_curr = speed_mps;
+        _drag.distance_integrated_m += 0.5f * (v_prev + v_curr) * dt_sec;
+        _drag.lastSpeed_mps = v_curr;
 
-//         _drag.startTime_sec = _pose.time_sec;
-//         _drag.startLat_deg  = _pose.lat_deg;
-//         _drag.startLon_deg  = _pose.lon_deg;
-//         _drag.lastSpeed_mps = speed_mps;
-//         _drag.maxSpeed_mps  = speed_mps;
+        // 2) Distance from haversine between start position and current position
+        //
+        // MISSING: haversineDistance_m implementation.
+        // Provide your own function or replace with a library call.
+        //
+        _drag.distance_haversine_m = haversineDistance_m(
+          _drag.startLat_deg, _drag.startLon_deg,
+          pose.lat_deg, pose.lon_deg
+        );
 
-//         _drag.distance_integrated_m = 0.0f;
-//         _drag.distance_haversine_m = 0.0f;
-
-//         _drag.has_0_60 = false;
-//         _drag.has_quarter = false;
-
-//         _drag.stopTimerRunning = false;
-
-//         Serial.print("DRAG: Run started at t = ");
-//         Serial.print(_drag.startTime_sec, 3);
-//         Serial.print(" s, speed = ");
-//         Serial.print(speed_mph, 2);
-//         Serial.println(" mph.");
-//       }
-//       else
-//       {
-//         // small creep, but not enough to start; stay in ARMED
-//       }
-//       break;
-//     }
-
-//     case DRAG_RUNNING:
-//     {
-//       // Track max speed for info
-//       if( speed_mps > _drag.maxSpeed_mps )
-//       {
-//         _drag.maxSpeed_mps = speed_mps;
-//       }
-
-//       // 1) Distance from integrated speed (trapezoidal integration)
-//       float v_prev = _drag.lastSpeed_mps;
-//       float v_curr = speed_mps;
-//       _drag.distance_integrated_m += 0.5f * (v_prev + v_curr) * dt_sec;
-//       _drag.lastSpeed_mps = v_curr;
-
-//       // 2) Distance from haversine between start position and current position
-//       _drag.distance_haversine_m = haversineDistance_m(_drag.startLat_deg, _drag.startLon_deg,
-//                                                       _pose.lat_deg, _pose.lon_deg);
-
-//       // 0-60 mph timing
-//       if( !_drag.has_0_60 && (speed_mps >= TARGET_60_MPS) )
-//       {
-//         _drag.has_0_60 = true;
-//         _drag.t_0_60_sec = _pose.time_sec - _drag.startTime_sec;
-//         _drag.v_0_60_mps = speed_mps;
-
-//         Serial.print("DRAG: 0-60 mph in ");
-//         Serial.print(_drag.t_0_60_sec, 3);
-//         Serial.print(" s, speed = ");
-//         Serial.print(speed_mph, 2);
-//         Serial.println(" mph.");
-//       }
-
-//       // 1/4 mile (check both distance methods)
-//       bool reachedInt = (_drag.distance_integrated_m  >= QUARTER_MILE_M);
-//       bool reachedHav = (_drag.distance_haversine_m   >= QUARTER_MILE_M);
-
-//       if( !_drag.has_quarter && (reachedInt || reachedHav) )
-//       {
-//         _drag.has_quarter = true;
-
-//         // For now, use current time as both ETs.
-//         // If you want more precision, you can interpolate back to the exact crossing.
-//         _drag.t_quarter_int_sec = _pose.time_sec - _drag.startTime_sec;
-//         _drag.t_quarter_hav_sec = _drag.t_quarter_int_sec;
-
-//         _drag.v_quarter_mps = speed_mps;
-
-//         _drag.state = DRAG_FINISHED;
-
-//         printDragRunSummary();
-//       }
-
-//       // Abort condition: if we slow down below stop threshold for a while before 1/4 mile
-//       if( !_drag.has_quarter )
-//       {
-//         if( updateStopTimer(ABORT_STOP_TIME_MS) )
-//         {
-//           Serial.println("DRAG: Run aborted (vehicle stopped/slowed before 1/4 mile).");
-//           resetDragState();
-//         }
-//       }
-//       break;
-//     }
-
-//     case DRAG_FINISHED:
-//     {
-//       // After a finished run, wait for the car to come to a stop, then auto-reset
-//       if( updateStopTimer(MIN_STOP_TIME_MS) )
-//       {
-//         Serial.println("DRAG: Finished run, vehicle stopped. Ready for next run.");
-//         resetDragState();
-//       }
-//       break;
-//     }
-
-//     default:
-//       resetDragState();
-//       break;
-//   }
-// }
-
-// } // namespace
+        // 0-60 mph timing
+        if (!_drag.has_0_60 && (speed_mps >= TARGET_60_MPS))
+        {
+          _drag.has_0_60   = true;
+          _drag.t_0_60_sec = pose.time_sec - _drag.startTime_sec;
+          _drag.v_0_60_m

@@ -1,3 +1,4 @@
+#pragma once
 /*
  * 1D Kalman filter for ground vehicle distance-from-start tracking.
  *

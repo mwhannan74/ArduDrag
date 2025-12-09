@@ -494,7 +494,6 @@ void loop()
       Serial.print("etime_ms: "); Serial.print(etime_ms);
       Serial.print(" etime_sec: "); Serial.print(etime_sec,5);
       Serial.print(" loopRate_Hz: "); Serial.println(loopRate_Hz);
-      Serial.println("");
 
       printGPS();
     }
