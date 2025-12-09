@@ -3,6 +3,8 @@
 #include <vector>
 #include <string>
 
+#include "KalmanFilter.h"
+
 //============================================================================================
 // HELPER FUNCTIONS
 //============================================================================================
@@ -456,18 +458,18 @@ void updateDragTiming(float dt_sec)
 //============================================================================================
 // GPS dead-reckoning state (speed + accel hold)
 //============================================================================================
-struct GpsTierA_DR
+struct GpsDeadReck
 {
   bool hasLast = false;
   bool hasPrev = false;
 
-  uint32_t t_last_ms = 0;
-  uint32_t t_prev_ms = 0;
+  uint32_t timestamp_ms = 0;
+  uint32_t timestamp_ms_prev = 0;
 
-  float v_last_mps = 0.0f;
-  float v_prev_mps = 0.0f;
+  float spd_mps = 0.0f;
+  float spd_mps_prev = 0.0f;
 
-  float a_hold_mps2 = 0.0f;  // acceleration computed from last two GPS SOG updates
+  float accel_mps2_calc = 0.0f;  // acceleration computed from last two GPS SOG updates
 
   // Optional debug
   float last_dt_sec = 0.0f;
@@ -480,7 +482,12 @@ struct GpsTierA_DR
 //                                        SETUP
 //============================================================================================
 //============================================================================================
+KalmanFilter _kf;
+float _kfRate_hz = 20.0;
+float _kfRate_ms = 1.0 / _kfRate_hz;
+
 unsigned long _timeStart_ms = 0;
+
 void setup() 
 {   
   pinMode(_ledPin, _ledOn);
@@ -492,6 +499,9 @@ void setup()
   Serial.println("Setting Up GPS");
   setupGPS();
   Serial.println("Completed GPS Setup");
+
+  // Kalman Filter Init
+  _kf.init(_kfRate_ms);
   
   _timeStart_ms = millis();
 }
@@ -502,12 +512,12 @@ void setup()
 //                                        LOOP
 //============================================================================================
 //============================================================================================
-unsigned long _blinkPeriod_ms  = 1000; // 1Hz
+unsigned long _blinkPeriod_ms   = 1000; // 1Hz
 unsigned long _processPeriod_ms = 50;  // 20Hz (IMU can go up to 100Hz)
-unsigned long _printPeriod_ms  = 200;  // 5Hz
+unsigned long _printPeriod_ms   = 200;  // 5Hz
 
 uint32_t _time_ms       = millis();  // number of milliseconds since the program started
-uint32_t _timeLED_ms    = millis();
+uint32_t _timeLED_ms    = millis();  // 
 uint32_t _timeProcess_ms = millis();
 uint32_t _timePrint_ms  = millis();
 
@@ -530,44 +540,45 @@ void loop()
   int gpsRes = readGPS(); // NA=0, FAIL=1, RMC=2, GGA=3, OTHER=4
 
   //------------------------------------------------------------
-  // Update accel-hold model on NEW RMC
+  // Update accel-hold model on new RMC message (RMC has lat, lon, and SOG)
   if( gpsRes == 2 && GPS.fix )
   {
-    float v_new_mps = GPS.speed * KNTS2MPS;
+    // new GPS speed and timestamp
+    float spd_mps = GPS.speed * KNTS2MPS;
     uint32_t t_new_ms = _time_ms;
 
     if( !_gpsDR.hasLast )
     {
       _gpsDR.hasLast   = true;
-      _gpsDR.t_last_ms = t_new_ms;
-      _gpsDR.v_last_mps = v_new_mps;
+      _gpsDR.timestamp_ms = t_new_ms;
+      _gpsDR.spd_mps = spd_mps;
 
       // no accel estimate yet
-      _gpsDR.a_hold_mps2 = 0.0f;
+      _gpsDR.accel_mps2_calc = 0.0f;
     }
     else
     {
       // Shift last -> prev
       _gpsDR.hasPrev   = true;
-      _gpsDR.t_prev_ms = _gpsDR.t_last_ms;
-      _gpsDR.v_prev_mps = _gpsDR.v_last_mps;
+      _gpsDR.timestamp_ms_prev = _gpsDR.timestamp_ms;
+      _gpsDR.spd_mps_prev = _gpsDR.spd_mps;
 
       // Store new as last
-      _gpsDR.t_last_ms = t_new_ms;
-      _gpsDR.v_last_mps = v_new_mps;
+      _gpsDR.timestamp_ms = t_new_ms;
+      _gpsDR.spd_mps = spd_mps;
 
       // Compute accel from two most recent GPS speeds
-      float dt_sec = 0.001f * float(_gpsDR.t_last_ms - _gpsDR.t_prev_ms);
+      float dt_sec = 0.001f * float(_gpsDR.timestamp_ms - _gpsDR.timestamp_ms_prev);
       _gpsDR.last_dt_sec = dt_sec;
 
       // Guard against weird dt
       if( dt_sec > 0.02f && dt_sec < 0.5f )
       {
-        _gpsDR.a_hold_mps2 = (_gpsDR.v_last_mps - _gpsDR.v_prev_mps) / dt_sec;
+        _gpsDR.accel_mps2_calc = (_gpsDR.spd_mps - _gpsDR.spd_mps_prev) / dt_sec;
       }
       else
       {
-        _gpsDR.a_hold_mps2 = 0.0f;
+        _gpsDR.accel_mps2_calc = 0.0f;
       }
     }
 
@@ -590,8 +601,8 @@ void loop()
 
     if( _gpsDR.hasLast )
     {
-      float dt_gps_sec = 0.001f * float(_time_ms - _gpsDR.t_last_ms);
-      v_pred_mps = _gpsDR.v_last_mps + _gpsDR.a_hold_mps2 * dt_gps_sec;
+      float dt_gps_sec = 0.001f * float(_time_ms - _gpsDR.timestamp_ms);
+      v_pred_mps = _gpsDR.spd_mps + _gpsDR.accel_mps2_calc * dt_gps_sec;
 
       if( v_pred_mps < 0.0f ) v_pred_mps = 0.0f;
     }
@@ -625,8 +636,8 @@ void loop()
       printGPS();
 
       // DR debug
-      Serial.print("DeadReck: v_last_mps="); Serial.print(_gpsDR.v_last_mps, 3);
-      Serial.print(" a_hold_mps2="); Serial.print(_gpsDR.a_hold_mps2, 3);
+      Serial.print("DeadReck: spd_mps="); Serial.print(_gpsDR.spd_mps, 3);
+      Serial.print(" accel_mps2_calc="); Serial.print(_gpsDR.accel_mps2_calc, 3);
       Serial.print(" last_dt_sec="); Serial.print(_gpsDR.last_dt_sec, 3);
       Serial.println("");
     }
