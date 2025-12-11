@@ -289,29 +289,33 @@ unsigned long _processPeriod_ms = 1000.0f * _kfRate_sec;
 unsigned long _printPeriod_ms   = 1000;  // 1Hz
 
 uint32_t _time_ms        = millis();  // number of milliseconds since the program started
-uint32_t _timeLED_ms     = millis();  // 
+uint32_t _timeLED_ms     = millis(); 
 uint32_t _timeProcess_ms = millis();
 uint32_t _timeKF_ms      = millis();
 uint32_t _timePrint_ms   = millis();
 
 bool _isFirstTime = true;
-bool _haveGpsFixInfo = true;
+bool _haveGpsFixInfo = false;
 bool _enableKF = false;
 bool _gpsDataGood = false;
 
-double _lat0;
-double _lon0;
+double _lat0; // origin for global distance calc
+double _lon0; // origin for dlobal distance calc
+
 float sigma_p_smoothed = 2.0f;
 
-float gpsSpdMax_mps = 0.0f;
+float gpsSpdMax_mps = 0.0f; // max speed every recorded
 
 unsigned int minSatellites = 6;
+
+float gpsDist_m = 0.0f;
+float gpsSpd_mps = 0.0f;
 
 DragFSM _dragFSM(&Serial);
 
 bool DEBUG = false;
 bool DEBUG2 = false;
-bool TEST = true;
+bool TEST = false;
 
 
 //------------------------------------------------------------
@@ -391,7 +395,7 @@ void loop()
         _isFirstTime = false;
         _enableKF = true;
 
-        // current GPS location
+        // GPS ORIGIN
         _lat0 = GPS.latitudeDegrees;
         _lon0 = GPS.longitudeDegrees;
 
@@ -402,7 +406,7 @@ void loop()
         _kf.init(_kfRate_sec, p0, v0, sigma_p_smoothed, sigma_v);
 
         // KF tuning params
-        _kf.setSigmaJ(0.45f);       // Model (not measurement) std dev for jerk (0.4f to 2.0f) -> Higher is more responsive to real world accel changes
+        _kf.setSigmaJ(0.8f);       // Model (not measurement) std dev for jerk (0.4f to 2.0f) -> Higher is more responsive to real world accel changes
         _kf.setR(sigma_p, sigma_v); // Measurement std dev -> Higher means trust measurements less and model more
 
 
@@ -413,8 +417,8 @@ void loop()
 
       //------------------------------------------------------------
       // compute change in linear distance from GPS measurements
-      float gpsDist_m = haversineDistance_m(_lat0, _lon0, GPS.latitudeDegrees, GPS.longitudeDegrees);
-      float gpsSpd_mps = GPS.speed * KNTS2MPS;      
+      gpsDist_m = haversineDistance_m(_lat0, _lon0, GPS.latitudeDegrees, GPS.longitudeDegrees);
+      gpsSpd_mps = GPS.speed * KNTS2MPS;
       if(DEBUG2) {Serial.print("gpsDist_m = "); Serial.println(gpsDist_m);}
       if(DEBUG2) {Serial.print("gpsSpd_mps = "); Serial.println(gpsSpd_mps);}
 
@@ -483,10 +487,10 @@ void loop()
         {
           if(DEBUG2) Serial.println("Skipping KF predict");
         }
-        float distKF = _kf.position();
-        float spdKF = _kf.velocity();
-        if(DEBUG2) {Serial.print("distKF = "); Serial.println(distKF);}
-        if(DEBUG2) {Serial.print("spdKF = "); Serial.println(spdKF);}
+        float distKF_m = _kf.position();
+        float spdKF_mps = _kf.velocity();
+        if(DEBUG2) {Serial.print("distKF_m = "); Serial.println(distKF_m);}
+        if(DEBUG2) {Serial.print("spdKF_mps = "); Serial.println(spdKF_mps);}
 
 
         //--------------------------------------------------------
@@ -496,41 +500,19 @@ void loop()
         _dragState.lat_deg     = GPS.latitudeDegrees;
         _dragState.lon_deg     = GPS.longitudeDegrees;        
         _dragState.heading_deg = angleWrap_deg(GPS.angle);
-        _dragState.distance_m  = distKF;
-        _dragState.speed_mps   = spdKF;
+        _dragState.distance_m  = distKF_m;
+        _dragState.speed_mps   = spdKF_mps;
       
         //--------------------------------------------------------
         // Run the Drag FSM logic
         if( TEST )
         {
           _kfFake.update(_time_ms);
-          _dragFSM.update(_time_ms, _kfFake.navGood, _kfFake.speed_mps, _kfFake.distance_m);
+          _dragFSM.update(_time_ms, _kfFake.navGood, _kfFake.speed_mps, _kfFake.distance_m, _kfFake.distance_m);
         }
         else
         {
-          _dragFSM.update(_time_ms, _gpsDataGood, spdKF, distKF);
-        }
-
-
-        // If FSM switches from DRAG_ARMED to DRAG_RUNNING
-        // 1/4 mile = 402.336 meters
-        if (_dragFSM.consumeKalmanResetRequest())
-        {
-          if(DEBUG2) Serial.println("*** FSM switched from DRAG_ARMED to DRAG_RUNNING ***");
-
-          // reset GPS origin
-          _lat0 = GPS.latitudeDegrees;
-          _lon0 = GPS.longitudeDegrees;
-
-          // reset the KF to start at 0.0
-          float p0 = 0.0f;
-          float v0 = 0.0f;
-          float sigma_v = 0.2f;
-          _kf.init(_kfRate_sec, p0, v0, sigma_p_smoothed, sigma_v);
-
-
-          // TEST
-          if( TEST ) _kfFake.resetDistance();
+          _dragFSM.update(_time_ms, _gpsDataGood, spdKF_mps, distKF_m, gpsSpd_mps);
         }
 
       } // if( _enableKF )  

@@ -55,7 +55,8 @@ public:
     DragState state = DRAG_WAIT_FOR_STOP;
 
     // Run time bookkeeping (derived from now_ms)
-    uint32_t startTime_ms = 0;   // system time at launch
+    uint32_t startTime_ms = 0;        // system time at launch
+    float    startDistance_m = 0.0f;  // global distance at launch
     float    maxSpeed_mps = 0.0f;
 
     // 0-60 mph results
@@ -82,7 +83,7 @@ public:
   static constexpr float QUARTER_MILE_M = 402.336f;
   
 
-  static constexpr float TARGET_60_MPH = 60.0f;
+  static constexpr float TARGET_60_MPH = 40.0f; //60.0f; // testing at 40mph because it is safer and easier
   static constexpr float TARGET_60_MPS = TARGET_60_MPH / MPS2MPH;
 
   //==========================================================================================
@@ -124,9 +125,10 @@ public:
    * - Caller must provide now_ms consistently (do not mix with millis() inside other layers).
    * - External KF must reset when requested and publish distance_m from that reset origin.
    */
-  void update(uint32_t now_ms, bool navDataGood, float speed_mps, float distance_m)
+  void update(uint32_t now_ms, bool navDataGood, float speed_mps, float distance_m, float speedGPS_mps)
   {
      const float speed_mph = speed_mps * MPS2MPH;
+     const float distanceRun_m = distance_m - _drag.startDistance_m;
 
     // Data quality gating
     if (!navDataGood)
@@ -172,16 +174,14 @@ public:
           // Launch detected -> start run
           _drag.state = DRAG_RUNNING;
 
-          _drag.startTime_ms = now_ms;
+          _drag.startTime_ms = now_ms;         // remember time we started
+          _drag.startDistance_m = distance_m;  // remember where we started
           _drag.maxSpeed_mps = speed_mps;
 
           _drag.has_0_60 = false;
           _drag.has_quarter = false;
 
           _drag.stopTimerRunning = false;
-
-          // One-shot KF reset request
-          _pendingKfReset = true;
 
           _Serial->print("-> Run started at t_ms = ");
           _Serial->print(now_ms);
@@ -198,10 +198,13 @@ public:
 
       case DRAG_RUNNING:
       {
+        //const float distanceRun_m = distance_m - _drag.startDistance_m;
+
         _Serial->print("DRAG_RUNNING: ");
         _Serial->print(" time "); _Serial->print(elapsedSec(now_ms), 2);
-        _Serial->print(" mph "); _Serial->print(speed_mph, 2);
-        _Serial->print(" mile "); _Serial->print(distance_m / MILE2MTR, 3);
+        _Serial->print(" KF_mph "); _Serial->print(speed_mph, 2);
+        _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mps, 2);
+        _Serial->print(" mile "); _Serial->print(distanceRun_m / MILE2MTR, 3);
         _Serial->println("");
 
         // Track max speed
@@ -227,13 +230,12 @@ public:
         }
 
         // 1/4 mile completion
-        // Model A: distance_m is since KF reset.
-        if (!_drag.has_quarter && (distance_m >= QUARTER_MILE_M))
+        if (!_drag.has_quarter && (distanceRun_m >= QUARTER_MILE_M))
         {
           _drag.has_quarter = true;
           _drag.t_quarter_sec = elapsedSec(now_ms);
           _drag.v_quarter_mps = speed_mps;
-          _drag.dist_quarter_m = distance_m;
+          _drag.dist_quarter_m = distanceRun_m;
 
           _drag.state = DRAG_FINISHED;
 
@@ -260,7 +262,7 @@ public:
         _Serial->print("DRAG_FINISHED (waiting for stop): ");
         _Serial->print(" time "); _Serial->print(elapsedSec(now_ms), 2);
         _Serial->print(" mph "); _Serial->print(speed_mph, 2);
-        _Serial->print(" mile "); _Serial->print(distance_m / MILE2MTR, 3);
+        _Serial->print(" mile "); _Serial->print(distanceRun_m / MILE2MTR, 3);
         _Serial->println("");
 
         // After finished run, wait for stop then auto-reset
@@ -278,22 +280,6 @@ public:
         reset();
         break;
     }
-  }
-
-  //==========================================================================================
-  // Kalman reset signaling
-  //==========================================================================================
-  /**
-   * @brief Returns true once per run start, then clears the request.
-   *
-   * Caller should use this to reset the external KF so that:
-   *   distance_m published subsequently begins near zero.
-   */
-  bool consumeKalmanResetRequest()
-  {
-    const bool v = _pendingKfReset;
-    _pendingKfReset = false;
-    return v;
   }
 
   //==========================================================================================
