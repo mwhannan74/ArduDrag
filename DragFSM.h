@@ -52,7 +52,8 @@ public:
 
   struct DragTiming
   {
-    DragState state = DRAG_WAIT_FOR_STOP;
+    // default state 
+    DragState state = DRAG_WAIT_FOR_STOP; 
 
     // Run time bookkeeping (derived from now_ms)
     uint32_t startTime_ms = 0;        // system time at launch
@@ -109,7 +110,6 @@ public:
   void reset()
   {
     _drag = DragTiming{};
-    _pendingKfReset = false;
     _Serial->println("DRAG: Reset, waiting for stop");
   }
 
@@ -120,10 +120,7 @@ public:
    * @param navDataGood  True if KF/GPS/navigation data is valid.
    * @param speed_mps    Fused speed estimate.
    * @param distance_m   Fused distance since KF reset (Model A).
-   *
-   * MISSING:
-   * - Caller must provide now_ms consistently (do not mix with millis() inside other layers).
-   * - External KF must reset when requested and publish distance_m from that reset origin.
+   * @param speedGPS_mps Speed raw from GPS
    */
   void update(uint32_t now_ms, bool navDataGood, float speed_mps, float distance_m, float speedGPS_mps)
   {
@@ -132,13 +129,15 @@ public:
 
     // Data quality gating
     if (!navDataGood)
-    {
+    {      
       _drag.stopTimerRunning = false;
 
+      // Stop and reset if we are actively running
       if (_drag.state == DRAG_RUNNING)
       {
-        _Serial->println("-> Nav data invalid, aborting run");
-        reset();
+        // EVENT: GPS is bad
+        _Serial->println("-> Nav data invalid, ABORTING RUN");
+        reset(); // reset data and state back to DRAG_WAIT_FOR_STOP
       }
       return;
     }
@@ -154,6 +153,7 @@ public:
 
         if (updateStopTimer(now_ms, speed_mps, _minStopTime_ms))
         {
+          // EVENT: detected complete stop
           _drag.state = DRAG_ARMED;
           _Serial->println("**************************************************************");
           _Serial->println("-> Armed (vehicle stopped, nav data OK)");
@@ -171,7 +171,7 @@ public:
         }
         else if (speed_mps >= _speedStartThreshold_mps)
         {
-          // Launch detected -> start run
+          // EVENT: detected movement
           _drag.state = DRAG_RUNNING;
 
           _drag.startTime_ms = now_ms;         // remember time we started
@@ -232,12 +232,13 @@ public:
         // 1/4 mile completion
         if (!_drag.has_quarter && (distanceRun_m >= QUARTER_MILE_M))
         {
+          // EVENT: Reached end of quarter mile
+          _drag.state = DRAG_FINISHED;
+
           _drag.has_quarter = true;
           _drag.t_quarter_sec = elapsedSec(now_ms);
           _drag.v_quarter_mps = speed_mps;
-          _drag.dist_quarter_m = distanceRun_m;
-
-          _drag.state = DRAG_FINISHED;
+          _drag.dist_quarter_m = distanceRun_m;         
 
           printRunSummary();
         }
@@ -247,10 +248,11 @@ public:
         {
           if (updateStopTimer(now_ms, speed_mps, _abortStopTime_ms))
           {
+            // EVENT: 
             _Serial->println("**************************************************************");
             _Serial->println("-> !!! Run aborted (vehicle stopped/slowed before 1/4 mile) !!!");
             _Serial->println("**************************************************************");
-            reset();
+            reset(); // reset data and state back to DRAG_WAIT_FOR_STOP
           }
         }
 
@@ -292,16 +294,15 @@ private:
   //==========================================================================================
   // Internal configuration (defaults match original intent)
   //==========================================================================================
-  float    _speedStopThreshold_mps  = 0.8f;
-  float    _speedStartThreshold_mps = 1.2f;
-  uint32_t _minStopTime_ms          = 2000;
-  uint32_t _abortStopTime_ms        = 2000;
+  float    _speedStopThreshold_mps  = 0.8f; // speed less than this is defined as "stopped" 
+  float    _speedStartThreshold_mps = 1.2f; // speed greater than this is defined as "moving or started" if previously "stopped"
+  uint32_t _minStopTime_ms          = 2000; // car has been "truly stopped" for at least this long, then reset/arm
+  uint32_t _abortStopTime_ms        = 2000; // While a run is in progress, if car "slows down or stops" for this long without reaching 1/4 mile, consider the run invalid and reset
 
   //==========================================================================================
   // Internal state
   //==========================================================================================
   DragTiming _drag;
-  bool _pendingKfReset = false;
   usb_serial_class* _Serial;
 
   //==========================================================================================
@@ -314,30 +315,53 @@ private:
     return dt_ms * 0.001f;
   }
 
+  /**
+  * Stop-detection timer helper.
+  *
+  * Tracks how long the vehicle's speed has remained below the configured stop threshold.
+  *
+  * Returns true once the speed has been continuously below the threshold for at least
+  * timeout_ms milliseconds. The internal timer is automatically started, stopped, and
+  * reset based on the current speed.
+  *
+  * @param now_ms     Current system time in milliseconds.
+  * @param speed_mps  Current vehicle speed in m/s.
+  * @param timeout_ms Required duration below the stop threshold before returning true.
+  *
+  * @return true  if the vehicle has been below the stop threshold for at least timeout_ms.
+  * @return false otherwise.
+  */
   bool updateStopTimer(uint32_t now_ms, float speed_mps, uint32_t timeout_ms)
   {
+    // Check if we are currently below the "stopped" speed threshold.
     if (speed_mps < _speedStopThreshold_mps)
     {
+      // If the stop timer is not running yet, start it now.
       if (!_drag.stopTimerRunning)
       {
         _drag.stopTimerRunning = true;
-        _drag.stopStart_ms = now_ms;
+        _drag.stopStart_ms = now_ms;   // record when we first went "stopped"
       }
       else
       {
+        // Timer is already running: check how long we've been "stopped".
         if ((now_ms - _drag.stopStart_ms) > timeout_ms)
         {
+          // We've been below the threshold long enough; stop the timer and signal timeout.
           _drag.stopTimerRunning = false;
-          return true;
+          return true;                 // condition satisfied
         }
       }
     }
     else
     {
+      // Speed is above the stop threshold -> cancel any in-progress stop timing.
       _drag.stopTimerRunning = false;
     }
+    // Either not below threshold long enough, or not stopped at all.
     return false;
   }
+
 
   void printRunSummary()
   {
