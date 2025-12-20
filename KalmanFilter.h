@@ -180,12 +180,18 @@ public:
         compute_Q_from_jerk(dt);
 
         // x_pred = A * x
-        for (i = 0; i < 3; i++) {
+        for (i = 0; i < 3; i++) 
+        {
             x_pred[i] = 0.0f;
-            for (j = 0; j < 3; j++) {
+            for (j = 0; j < 3; j++) 
+            {
                 x_pred[i] += A[i][j] * x[j];
             }
         }
+        // ensure speed never goes negative
+        // x = [ p; v; a ]
+        if( x_pred[1] < 0.0 ) x_pred[1] = 0.0;
+
 
         // AP = A * P
         for (i = 0; i < 3; i++) {
@@ -323,6 +329,9 @@ public:
         for (i = 0; i < 3; i++) {
             x[i] += K[i][0] * y[0] + K[i][1] * y[1];
         }
+        // ensure speed never goes negative
+        // x = [ p; v; a ]
+        if( x[1] < 0.0 ) x[1] = 0.0;
 
         // Update covariance: P = (I - K H) * P_old
         //

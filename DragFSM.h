@@ -84,7 +84,7 @@ public:
   static constexpr float QUARTER_MILE_M = 402.336f;
   
 
-  static constexpr float TARGET_60_MPH = 40.0f; //60.0f; // testing at 40mph because it is safer and easier
+  static constexpr float TARGET_60_MPH = 60.0f;
   static constexpr float TARGET_60_MPS = TARGET_60_MPH / MPS2MPH;
 
   //==========================================================================================
@@ -118,14 +118,20 @@ public:
    *
    * @param now_ms       System time in milliseconds since power-on.
    * @param navDataGood  True if KF/GPS/navigation data is valid.
-   * @param speed_mps    Fused speed estimate.
+   * @param speedKF_mps  Fused speed estimate.
    * @param distance_m   Fused distance since KF reset (Model A).
    * @param speedGPS_mps Speed raw from GPS
    */
-  void update(uint32_t now_ms, bool navDataGood, float speed_mps, float distance_m, float speedGPS_mps)
+  void update(uint32_t now_ms, bool navDataGood, float speedKF_mps, float distance_m, float speedGPS_mps)
   {
-     const float speed_mph = speed_mps * MPS2MPH;
-     const float distanceRun_m = distance_m - _drag.startDistance_m;
+    //float speed_mps = speedKF_mps; // Use KF speed
+    float speed_mps = speedGPS_mps;  // Use GPS speed
+    const float speed_mph = speed_mps * MPS2MPH;
+
+    const float speedKF_mph = speedKF_mps * MPS2MPH; 
+    const float speedGPS_mph = speedGPS_mps * MPS2MPH;
+    
+    const float distanceRun_m = distance_m - _drag.startDistance_m;
 
     // Data quality gating
     if (!navDataGood)
@@ -165,6 +171,11 @@ public:
       case DRAG_ARMED:
       {
         _Serial->println("DRAG_ARMED");
+        _Serial->print(" KF_mph "); _Serial->print(speedKF_mph, 2);
+        _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mph, 2);
+        _Serial->print(" SPD_mph "); _Serial->println(speed_mph, 2);
+
+        _Serial->print("Waiting for speed (m/s) "); _Serial->print(speed_mps,1); _Serial->print(" > "); _Serial->println(_speedStopThreshold_mps,1);
         if (speed_mps < _speedStopThreshold_mps)
         {
           // stay armed
@@ -173,9 +184,14 @@ public:
         {
           // EVENT: detected movement
           _drag.state = DRAG_RUNNING;
+          _Serial->println("Movement Detected --> Changing to DRAG_RUNNING");
 
-          _drag.startTime_ms = now_ms;         // remember time we started
-          _drag.startDistance_m = distance_m;  // remember where we started
+          // initialize drag info
+          uint32_t timeStep_ms = 50;
+          uint32_t offsetSteps = 5;
+          uint32_t timeOffset_ms = offsetSteps*timeStep_ms;
+          _drag.startTime_ms = now_ms - timeOffset_ms; // remember time we started
+          _drag.startDistance_m = distance_m;          // remember where we started
           _drag.maxSpeed_mps = speed_mps;
 
           _drag.has_0_60 = false;
@@ -191,7 +207,7 @@ public:
         }
         else
         {
-          // small creep, not enough to start
+          // > stop but less than start threadhold (small creep, not enough to start)
         }
         break;
       }
@@ -202,8 +218,9 @@ public:
 
         _Serial->print("DRAG_RUNNING: ");
         _Serial->print(" time "); _Serial->print(elapsedSec(now_ms), 2);
-        _Serial->print(" KF_mph "); _Serial->print(speed_mph, 2);
-        _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mps, 2);
+        _Serial->print(" SPD_mph "); _Serial->print(speed_mph, 2);
+        _Serial->print(" KF_mph "); _Serial->print(speedKF_mph, 2);
+        _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mph, 2);
         _Serial->print(" mile "); _Serial->print(distanceRun_m / MILE2MTR, 3);
         _Serial->println("");
 
@@ -216,12 +233,15 @@ public:
         // 0-60 mph timing
         if (!_drag.has_0_60 && (speed_mps >= TARGET_60_MPS))
         {
+          // EVENT: Reached end of quarter mile
+          _drag.state = DRAG_FINISHED;
+
           _drag.has_0_60 = true;
           _drag.t_0_60_sec = elapsedSec(now_ms);
           _drag.v_0_60_mps = speed_mps;
 
           _Serial->println("**************************************************************");
-          _Serial->print("-> 0-60 mph in ");
+          _Serial->print("-> 0-"); _Serial->print(TARGET_60_MPH,1); _Serial->print(" mph in ");
           _Serial->print(_drag.t_0_60_sec, 3);
           _Serial->print(" s, speed = ");
           _Serial->print(speed_mph, 2);
@@ -229,6 +249,7 @@ public:
           _Serial->println("**************************************************************");
         }
 
+        // DISABLED
         // 1/4 mile completion
         if (!_drag.has_quarter && (distanceRun_m >= QUARTER_MILE_M))
         {
@@ -262,7 +283,7 @@ public:
       case DRAG_FINISHED:
       {
         _Serial->print("DRAG_FINISHED (waiting for stop): ");
-        _Serial->print(" time "); _Serial->print(elapsedSec(now_ms), 2);
+        _Serial->print(" eTime "); _Serial->print(elapsedSec(now_ms), 2);
         _Serial->print(" mph "); _Serial->print(speed_mph, 2);
         _Serial->print(" mile "); _Serial->print(distanceRun_m / MILE2MTR, 3);
         _Serial->println("");
@@ -294,8 +315,8 @@ private:
   //==========================================================================================
   // Internal configuration (defaults match original intent)
   //==========================================================================================
-  float    _speedStopThreshold_mps  = 0.8f; // speed less than this is defined as "stopped" 
-  float    _speedStartThreshold_mps = 1.2f; // speed greater than this is defined as "moving or started" if previously "stopped"
+  float    _speedStopThreshold_mps  = 0.3f; // speed less than this is defined as "stopped" 
+  float    _speedStartThreshold_mps = 0.4f; // speed greater than this is defined as "moving/started" if previously "stopped"
   uint32_t _minStopTime_ms          = 2000; // car has been "truly stopped" for at least this long, then reset/arm
   uint32_t _abortStopTime_ms        = 2000; // While a run is in progress, if car "slows down or stops" for this long without reaching 1/4 mile, consider the run invalid and reset
 
