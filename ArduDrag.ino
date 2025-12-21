@@ -281,7 +281,7 @@ DragFSM _dragFSM(&Serial);
 
 bool DEBUG = false;
 bool DEBUG2 = false;
-bool TEST = true;
+bool TEST = false;
 
 uint32_t _counter = 0;
 
