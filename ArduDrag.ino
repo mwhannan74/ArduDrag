@@ -41,23 +41,23 @@ static const std::vector<std::string> GpsFixQuality{"invalid", "SPS", "DGPS", "P
 
 void setupGPS()
 {
-  // // Having issues reliably connecting to GPS
-  // bool initConnectWithDefaultBaud = true;
-  // if( initConnectWithDefaultBaud )
-  // {
-  //   // defualt GPS baud rate is 9600
-  //   SerialGPS.begin(9600);
-  //   delay(500);
+  // Having issues reliably connecting to GPS
+  bool initConnectWithDefaultBaud = true;
+  if( initConnectWithDefaultBaud )
+  {
+    // defualt GPS baud rate is 9600
+    SerialGPS.begin(9600);
+    delay(500);
 
-  //   // Change GPS to 57600 baud rate for robustness using 2 NMEA messages.
-  //   GPS.sendCommand(PMTK_SET_BAUD_57600);
-  //   SerialGPS.end();
-  //   delay(500);  
-  // }
-  // SerialGPS.begin(57600);
-  // delay(500);
-
+    // Change GPS to 57600 baud rate for robustness using 2 NMEA messages.
+    GPS.sendCommand(PMTK_SET_BAUD_57600);
+    SerialGPS.end();
+    delay(500);  
+  }
   SerialGPS.begin(57600);
+  delay(500);
+
+  // SerialGPS.begin(57600);
 
   // Always request RMC + GGA (RMC = lat/lon/sog/cog/magVar, GGA = lat/lon/alt/qual/sats)
   GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
@@ -146,36 +146,10 @@ void printGPS()
 
 
 //============================================================================================
-// POSE DATA - Interpolated/filtered data that we do all calculations on
+// GPS HELPER FUNCTIONS
 //============================================================================================
-struct
-{
-  float time_sec = 0;
-  unsigned int numSat = 0;
-  float lat_deg = 0;
-  float lon_deg = 0;  
-  float heading_deg = 0;
-  float distance_m = 0;
-  float speed_mps = 0;
-   
-  // print in CSV format
-  void printCSV()
-  {
-    Serial.print("CSV, ");
-    Serial.print(time_sec); Serial.print(", ");
-    Serial.print(numSat); Serial.print(", ");
-    Serial.print(lat_deg,11); Serial.print(", ");
-    Serial.print(lon_deg,11); Serial.print(", ");    
-    Serial.print(heading_deg); Serial.print(", ");
-    Serial.print(distance_m); Serial.print(", ");
-    Serial.println(speed_mps);
-  }
-} _dragState;
 
-
-//============================================================================================
 // Haversine distance between two lat/lon points in meters
-//============================================================================================
 float haversineDistance_m(float lat1_deg, float lon1_deg, float lat2_deg, float lon2_deg)
 {
   const float R = 6371000.0f; // Earth radius in meters
@@ -197,8 +171,6 @@ float haversineDistance_m(float lat1_deg, float lon1_deg, float lat2_deg, float 
   return d;
 }
 
-
-//============================================================================================
 float baseSigmaFromFix(int fixQuality)
 {
     // Common NMEA GGA quality encodings:
@@ -297,18 +269,13 @@ bool _haveGpsFixInfo = false;
 bool _enableKF = false;
 bool _gpsDataGood = false;
 
-double _lat_prev; // origin for global distance calc
-double _lon_prev; // origin for dlobal distance calc
+double _lat_prev;
+double _lon_prev;
 
-float sigma_p_smoothed = 2.0f;
-float _sigma_v = 0.1f; // m/s uncertainty for speed measument of GPS
-
-float gpsSpdMax_mps = 0.0f; // max speed every recorded
-
-unsigned int minSatellites = 6;
-
+float gpsSpdMax_mps = 0.0f; // max speed recorded from GPS
 float gpsDist_m = 0.0f;
 float gpsSpd_mps = 0.0f;
+unsigned int minSatellites = 6;
 
 DragFSM _dragFSM(&Serial);
 
@@ -320,13 +287,24 @@ uint32_t _counter = 0;
 
 
 //------------------------------------------------------------
+float sigma_state_p0 = 2.0f;             // (static m) initial position STATE uncertanty P (filter reset) -> start large and let KF learn over time
+float sigma_p_smoothed = sigma_state_p0; // (dynamic m) position MEASUREMENT uncertainty R of GPS -> updates in real time
+
+float _sigma_state_v0 = 1.0f; // (static m/s) initial speed STATE uncertanty P (filter reset) -> start large and let KF learn over time
+float _sigma_v = 0.2f;        // (static m/s) speed MEASUREMENT uncertainty R of GPS -> reduce to trust GPS more
+
+float _sigma_j = 2.0f; // (static m/s^3) jerk noise uncertainty used to compute Q -> (0.4f to 2.0f) where higher makes model more responsive to real world accel changes
+
+
+
+//------------------------------------------------------------
 // This will loop as fast as it can. Timer periods set above will manage when different functionality runs.
 void loop() 
 { 
   // Elapsed Time for each loop (each loop takes around 1-2ms to execute)
   uint32_t etime_ms  = millis() - _time_ms;
-  float etime_sec         = 0.001f * float(etime_ms);
-  float loopRate_Hz       = 1.0f / etime_sec;
+  float etime_sec    = 0.001f * float(etime_ms);
+  float loopRate_Hz  = 1.0f / etime_sec;
 
   // get the current time in msec for this loop
   _time_ms = millis();
@@ -393,20 +371,6 @@ void loop()
 
 
       //------------------------------------------------------------
-      // Compute pos std dev based on GPS quality
-      float sigma_p = computeSigmaP(GPS.fixquality, GPS.satellites, GPS.HDOP);
-      if(DEBUG2) {Serial.print("sigma_p = "); Serial.println(sigma_p);}
-
-      // lowpass filter sigma to keep filter stable
-      const float alpha = 0.2f;
-      sigma_p_smoothed = (1.0f - alpha) * sigma_p_smoothed + alpha * sigma_p;
-      if(DEBUG2) {Serial.print("sigma_p_smoothed = "); Serial.println(sigma_p_smoothed);}
-
-      // apply sigma
-      _kf.setR(sigma_p_smoothed, _sigma_v);
-
-
-      //------------------------------------------------------------
       // On the first time we receive a GPS message
       if( _isFirstTime )
       {
@@ -419,22 +383,38 @@ void loop()
 
         // Kalman Filter Init
         float p0 = 0.0f;
-        float v0 = 0.0f;
-        _kf.init(_kfRate_sec, p0, v0, sigma_p_smoothed, _sigma_v);
+        float v0 = 0.0f;        
+        _kf.init(_kfRate_sec, p0, v0, sigma_state_p0, _sigma_state_v0); // Sets inital state uncertainty P
 
-        // KF tuning params
-        _kf.setSigmaJ(2.0f);       // Model (not measurement) std dev for jerk (0.4f to 2.0f) -> Higher is more responsive to real world accel changes
-        _kf.setR(sigma_p, _sigma_v); // Measurement std dev -> Higher means trust measurements less and model more
+        // Set Jerk and this Model uncertainty Q
+        _kf.setSigmaJ(_sigma_j);
       }
+
+
+      //------------------------------------------------------------
+      // Compute pos std dev based on GPS quality
+      float sigma_p = computeSigmaP(GPS.fixquality, GPS.satellites, GPS.HDOP);
+      if(DEBUG2) {Serial.print("sigma_p = "); Serial.println(sigma_p);}
+
+      // lowpass filter sigma to keep filter stable
+      const float alpha = 0.2f;
+      sigma_p_smoothed = (1.0f - alpha) * sigma_p_smoothed + alpha * sigma_p;
+      if(DEBUG2) {Serial.print("sigma_p_smoothed = "); Serial.println(sigma_p_smoothed);}
+      
+      // update measurement uncertainty R
+      _kf.setR_measurement(sigma_p_smoothed, _sigma_v);
       
 
       //------------------------------------------------------------
       // compute change in linear distance from GPS measurements
       float gpsDeltaDist_m = haversineDistance_m(_lat_prev, _lon_prev, GPS.latitudeDegrees, GPS.longitudeDegrees);
-      gpsDist_m += gpsDeltaDist_m;
+      gpsDist_m += abs(gpsDeltaDist_m); // always increasing
       _lat_prev = GPS.latitudeDegrees;
       _lon_prev = GPS.longitudeDegrees;
       
+
+      //------------------------------------------------------------
+      // GPS Speed
       gpsSpd_mps = GPS.speed * KNTS2MPS;
       if(DEBUG2) {Serial.print("gpsDist_m = "); Serial.println(gpsDist_m);}
       if(DEBUG2) {Serial.print("gpsSpd_mps = "); Serial.println(gpsSpd_mps);}
@@ -448,12 +428,11 @@ void loop()
 
       // deadband for practical GPS speed (it never goes to zero with real GPS measurements)
       float minGpsSpeed = minSpeedBasedonSatellites(GPS.satellites);
-      if( gpsSpd_mps < minGpsSpeed )
-      {
-        gpsSpd_mps = 0.0f;
-      }
-      if(DEBUG2) {Serial.print("gpsSpd_mps = "); Serial.println(gpsSpd_mps);}
-
+      // if( gpsSpd_mps < minGpsSpeed )
+      // {
+      //   gpsSpd_mps = 0.0f;
+      // }
+      // if(DEBUG2) {Serial.print("gpsSpd_mps = "); Serial.println(gpsSpd_mps);}
 
       // Update Drag FSM speeds for the different states
       _dragFSM.setStopThresholdMps( minGpsSpeed + 0.1 );
@@ -503,7 +482,7 @@ void loop()
 
 
       //------------------------------------------------------------
-      // *** Run KF predicit if enough time has passed ***
+      // Run KF PREDICT if enough time has passed
       float dt = (_time_ms - _timeKF_ms) / 1000.0f;
       if(DEBUG2) {Serial.print("dt = "); Serial.println(dt);}
       if( dt > 0.005 ) // ignore if we just did a predict
@@ -519,7 +498,7 @@ void loop()
 
 
       //------------------------------------------------------------
-      // *** Run KF update to fuse new measurements ***
+      // Run KF UPDATE to fuse new measurements
       _kf.update(gpsDist_m, gpsSpd_mps);      
       if(DEBUG2) Serial.println("KF Update");
 
@@ -566,20 +545,15 @@ void loop()
         if(DEBUG2) {Serial.print("distKF_m = "); Serial.println(distKF_m);}
         if(DEBUG2) {Serial.print("spdKF_mps = "); Serial.println(spdKF_mps);}
 
-
-        //--------------------------------------------------------
-        // Update the Drag State
-        _dragState.time_sec    = float(_time_ms - _timeStart_ms) / 1000.0f;
-        _dragState.numSat      = GPS.satellites;
-        _dragState.lat_deg     = GPS.latitudeDegrees;
-        _dragState.lon_deg     = GPS.longitudeDegrees;        
-        _dragState.heading_deg = angleWrap_deg(GPS.angle);
-        _dragState.distance_m  = distKF_m;
-        _dragState.speed_mps   = spdKF_mps;
       
         //--------------------------------------------------------
         // Run the Drag FSM logic
         _dragFSM.update(_time_ms, _gpsDataGood, spdKF_mps, distKF_m, gpsSpd_mps);
+        if( _dragFSM.state() == DragFSM::DragState::DRAG_ARMED )
+        {
+          // Reset state uncertainty to be larger to help with start from zero speed again
+          _kf.initP_state(sigma_p_smoothed, _sigma_state_v0);
+        }
 
       } // if( _enableKF )  
     } // if( _time_ms - _timeProcess_ms > _processPeriod_ms )

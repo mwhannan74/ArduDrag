@@ -188,10 +188,6 @@ public:
                 x_pred[i] += A[i][j] * x[j];
             }
         }
-        // ensure speed never goes negative
-        // x = [ p; v; a ]
-        if( x_pred[1] < 0.0 ) x_pred[1] = 0.0;
-
 
         // AP = A * P
         for (i = 0; i < 3; i++) {
@@ -329,9 +325,6 @@ public:
         for (i = 0; i < 3; i++) {
             x[i] += K[i][0] * y[0] + K[i][1] * y[1];
         }
-        // ensure speed never goes negative
-        // x = [ p; v; a ]
-        if( x[1] < 0.0 ) x[1] = 0.0;
 
         // Update covariance: P = (I - K H) * P_old
         //
@@ -391,19 +384,28 @@ public:
     const float* state() const { return x; }
     const float (*covariance() const)[3] { return P; }
 
-    // Sets jerk noise std dev (m/s^3).
+
+    // MODEL: Sets jerk noise std dev (m/s^3) which in turns sets Q via compute_Q_from_jerk()
     //   Higher -> more responsive to accel changes
     //   Lower -> smoother/more model-trusting (more filtering)
     void setSigmaJ(float sj = 0.45f) // 0.4f to 2.0f
     { sigma_j = sj; }
 
-    // Sets measurement noise *std devs* for position (m) and velocity (m/s).
+    // MEASUREMENT: Sets R the measurement noise covariance matrix (std devs) for position (m) and velocity (m/s).
     //   Higher -> trust measurements less (more filtering) 
     //   Lower -> trust measurements more
-    void setR(float sigma_p=1.0f, float sigma_v=0.2f)
+     void setR_measurement(float sigma_p=1.0f, float sigma_v=0.2f)
     {
         R[0][0] = sigma_p * sigma_p;   R[0][1] = 0.0f;
         R[1][0] = 0.0f;               R[1][1] = sigma_v * sigma_v;
+    }
+
+    // STATE: Initialize state estimate covariance P with variance = sigma^2
+    void initP_state(float sigma_p=2.0f, float sigma_v=1.0f)
+    {
+        P[0][0] = sigma_p*sigma_p; P[0][1] = 0.0f;            P[0][2] = 0.0f;
+        P[1][0] = 0.0f;            P[1][1] = sigma_v*sigma_v; P[1][2] = 0.0f;
+        P[2][0] = 0.0f;            P[2][1] = 0.0f;            P[2][2] = 10.0f;
     }
 
 private:

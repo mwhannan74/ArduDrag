@@ -124,8 +124,10 @@ public:
    */
   void update(uint32_t now_ms, bool navDataGood, float speedKF_mps, float distance_m, float speedGPS_mps)
   {
+    // Select which speed source to use
     //float speed_mps = speedKF_mps; // Use KF speed
     float speed_mps = speedGPS_mps;  // Use GPS speed
+
     const float speed_mph = speed_mps * MPS2MPH;
 
     const float speedKF_mph = speedKF_mps * MPS2MPH; 
