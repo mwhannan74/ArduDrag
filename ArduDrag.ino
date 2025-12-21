@@ -216,8 +216,8 @@ float computeSigmaP(int fixQuality, int sats, float hdop)
 float minSpeedBasedonSatellites(unsigned int numSat)
 {
   if( numSat <= 6)      return 1.2f;
-  else if( (numSat > 6) && (numSat <= 9) ) return 0.9f;
-  else                 return 0.5f;
+  else if( (numSat > 6) && (numSat <= 9) ) return 0.8f;
+  else                 return 0.35f;
 }
 
 
@@ -435,8 +435,8 @@ void loop()
       // if(DEBUG2) {Serial.print("gpsSpd_mps = "); Serial.println(gpsSpd_mps);}
 
       // Update Drag FSM speeds for the different states
-      _dragFSM.setStopThresholdMps( minGpsSpeed + 0.1 );
-      _dragFSM.setStartThresholdMps(minGpsSpeed + 0.2 );
+      _dragFSM.setStopThresholdMps( minGpsSpeed + 0.0 );
+      _dragFSM.setStartThresholdMps(minGpsSpeed + 0.1 );
 
 
       //------------------------------------------------------------
