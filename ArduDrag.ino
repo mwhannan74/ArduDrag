@@ -1,8 +1,4 @@
-// GPS
 #include <Adafruit_GPS.h>
-#include <vector>
-#include <string>
-
 #include "KalmanFilter.h"
 #include "DragFSM.h"
 
@@ -37,10 +33,26 @@ bool _ledOn = true;
 #define SerialGPS Serial1 // rename for convenience
 
 Adafruit_GPS GPS(&SerialGPS);
-static const std::vector<std::string> GpsFixQuality{"invalid", "SPS", "DGPS", "PPS", "RTK", "fRTK", "dead reck", "manual", "sim"};
+const char* GpsFixQuality(uint8_t q)
+{
+  switch (q)
+  {
+    case 1: return "SPS";
+    case 2: return "DGPS";
+    case 3: return "PPS";
+    case 4: return "RTK";
+    case 5: return "fRTK";
+    case 6: return "dead reck";
+    case 7: return "manual";
+    case 8: return "sim";
+    default: return "invalid";
+  }
+}
 
 void setupGPS()
 {
+  //Serial.println("Setting Up GPS");  
+
   // Having issues reliably connecting to GPS
   bool initConnectWithDefaultBaud = true;
   if( initConnectWithDefaultBaud )
@@ -57,8 +69,6 @@ void setupGPS()
   SerialGPS.begin(57600);
   delay(500);
 
-  // SerialGPS.begin(57600);
-
   // Always request RMC + GGA (RMC = lat/lon/sog/cog/magVar, GGA = lat/lon/alt/qual/sats)
   GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
  
@@ -66,6 +76,7 @@ void setupGPS()
   GPS.sendCommand(PMTK_SET_NMEA_UPDATE_10HZ);
   
   delay(200);
+  //Serial.println("Completed GPS Setup");
 }
 
 // Read data from the GPS serial port in the 'main loop'.
@@ -113,7 +124,7 @@ void printGPS()
   // 2 = DGPS
   // 4 = RTK fixed
   // 5 = RTK float
-  Serial.print(" Fix_quality="); Serial.print( GpsFixQuality[(int)GPS.fixquality].c_str() ); 
+  Serial.print(" Fix_quality="); Serial.print( GpsFixQuality((int)GPS.fixquality) );
 
   // < 1.2:   Excellent -> near-centimeter accuracy (ideal for high-precision tasks).
   // 1.2-2.0: Good
@@ -162,8 +173,7 @@ float haversineDistance_m(float lat1_deg, float lon1_deg, float lat2_deg, float 
   float sin_dphi_2    = sin(dphi * 0.5f);
   float sin_dlambda_2 = sin(dlambda * 0.5f);
 
-  float a = sin_dphi_2 * sin_dphi_2 +
-            cos(phi1) * cos(phi2) * sin_dlambda_2 * sin_dlambda_2;
+  float a = sin_dphi_2 * sin_dphi_2 + cos(phi1) * cos(phi2) * sin_dlambda_2 * sin_dlambda_2;
 
   float c = 2.0f * atan2(sqrt(a), sqrt(1.0f - a));
   float d = R * c;
@@ -171,11 +181,13 @@ float haversineDistance_m(float lat1_deg, float lon1_deg, float lat2_deg, float 
   return d;
 }
 
+// Position std dev (meters) based on GPS fix quality
 float baseSigmaFromFix(int fixQuality)
 {
     // Common NMEA GGA quality encodings:
     // 0=invalid, 1=GPS(SPS), 2=DGPS, 4=RTK fixed, 5=RTK float
-    switch (fixQuality) {
+    switch (fixQuality) 
+    {
         case 4:  return 0.05f;  // RTK fixed
         case 5:  return 0.25f;  // RTK float
         case 2:  return 0.8f;   // DGPS/SBAS
@@ -184,6 +196,7 @@ float baseSigmaFromFix(int fixQuality)
     }
 }
 
+// State estimation covariance P std dev based on fix quality, num of sats, and hdop.
 float computeSigmaP(int fixQuality, int sats, float hdop)
 {
     float base = baseSigmaFromFix(fixQuality);
@@ -199,7 +212,8 @@ float computeSigmaP(int fixQuality, int sats, float hdop)
     // Satellite factor: more sats => lower sigma
     // 8 sats ~ nominal; fewer increases sigma modestly.
     float satFactor = 1.0f;
-    if (sats > 0) {
+    if (sats > 0) 
+    {
         satFactor = 8.0f / (float)sats;
         if (satFactor < 0.7f) satFactor = 0.7f;
         if (satFactor > 2.5f) satFactor = 2.5f;
@@ -211,13 +225,13 @@ float computeSigmaP(int fixQuality, int sats, float hdop)
     return base * satFactor * hdopFactor;
 }
 
-// Min measureable speed from GPS based on number of satellites
+// Min measureable speed from GPS based on number of satellites (meters/second)
 // 0.5 mps = 1.12 mph
 float minSpeedBasedonSatellites(unsigned int numSat)
 {
-  if( numSat <= 6)      return 1.2f;
-  else if( (numSat > 6) && (numSat <= 9) ) return 0.8f;
-  else                 return 0.35f;
+  if( numSat <= 6)                         return 1.2f;  // 1.2mps = 2.7 mph
+  else if( (numSat > 6) && (numSat <= 9) ) return 0.8f;  // 0.8mps = 1.8 mph
+  else                                     return 0.35f; // 0.35mps = 0.78mph
 }
 
 
@@ -226,21 +240,16 @@ float minSpeedBasedonSatellites(unsigned int numSat)
 //                                        SETUP
 //============================================================================================
 //============================================================================================
-unsigned long _timeStart_ms = 0;
-
 void setup() 
 {   
+  // Configure DIO for LED
   pinMode(_ledPin, _ledOn);
 
   // Configure the USB Serial port
   Serial.begin(115200);
 
   // Configure GPS interface
-  Serial.println("Setting Up GPS");
   setupGPS();
-  Serial.println("Completed GPS Setup");
-
-  _timeStart_ms = millis();
 }
 
 
@@ -249,13 +258,12 @@ void setup()
 //                                        LOOP
 //============================================================================================
 //============================================================================================
-KalmanFilter _kf;
-float _kfRate_hz = 20.0; // this needs to match processPeriod
-float _kfRate_sec = 1.0 / _kfRate_hz;
+float _processRate_hz = 20.0f;
+float _processPeriod_sec = 1.0f / _processRate_hz;
+unsigned long _processPeriod_ms = 1000.0f * _processPeriod_sec;
 
-unsigned long _blinkPeriod_ms   = 1000; // 1Hz
-unsigned long _processPeriod_ms = 1000.0f * _kfRate_sec;
-unsigned long _printPeriod_ms   = 1000;  // 1Hz
+unsigned long _blinkPeriod_ms = 1000; // 1Hz
+unsigned long _printPeriod_ms = 1000; // 1Hz
 
 uint32_t _time_ms        = millis();  // number of milliseconds since the program started
 uint32_t _timeLED_ms     = millis(); 
@@ -280,13 +288,14 @@ unsigned int minSatellites = 6;
 DragFSM _dragFSM(&Serial);
 
 bool DEBUG = false;
-bool DEBUG2 = false;
 bool TEST = false;
-
-uint32_t _counter = 0;
-
+uint32_t _testCnt = 0;
 
 //------------------------------------------------------------
+KalmanFilter _kf;
+
+float _kfRate_sec = _processPeriod_sec;
+
 float sigma_state_p0 = 2.0f;             // (static m) initial position STATE uncertanty P (filter reset) -> start large and let KF learn over time
 float sigma_p_smoothed = sigma_state_p0; // (dynamic m) position MEASUREMENT uncertainty R of GPS -> updates in real time
 
@@ -296,17 +305,17 @@ float _sigma_v = 0.2f;        // (static m/s) speed MEASUREMENT uncertainty R of
 float _sigma_j = 2.0f; // (static m/s^3) jerk noise uncertainty used to compute Q -> (0.4f to 2.0f) where higher makes model more responsive to real world accel changes
 
 
-
-//------------------------------------------------------------
+//------------------------------------------------------------------------------------------------------------------------
 // This will loop as fast as it can. Timer periods set above will manage when different functionality runs.
+//------------------------------------------------------------------------------------------------------------------------
 void loop() 
 { 
-  // Elapsed Time for each loop (each loop takes around 1-2ms to execute)
+  // Elapsed Time for each loop (each loop takes around 1ms to execute)
   uint32_t etime_ms  = millis() - _time_ms;
   float etime_sec    = 0.001f * float(etime_ms);
   float loopRate_Hz  = 1.0f / etime_sec;
 
-  // get the current time in msec for this loop
+  // get the current time in msec for this loop (must come after etime calc)
   _time_ms = millis();
   
   //------------------------------------------------------------
@@ -317,34 +326,34 @@ void loop()
   // Only run processing if we have a GPS fix
   if( GPS.fix )
   {
-    // did we get sat fix info yet?
+    // Did we get sat fix info yet? 
+    // gpsRes = 3 = GGA --> satillite information
     if( gpsRes == 3 && !_haveGpsFixInfo )
     {
       _haveGpsFixInfo = true;
     }
   }
 
-  
+  //------------------------------------------------------------  
+  // Do nothing unless we have a GPS fix and have recieved GPS satillite info (fix)
   if( GPS.fix && _haveGpsFixInfo )
   {    
-    //===============================================================
     //===============================================================
     // KF update only on new RMC message (RMC has lat, lon, and SOG)
     // Event driven with a rate around 10Hz 
     //===============================================================
-    //===============================================================    
     if( gpsRes == 2 )
     {   
-      uint32_t time_gps_process_start_ms =  millis();
-
-      if(DEBUG2) Serial.println("=== RMC Message Received ==="); 
+      if(DEBUG) Serial.println("=== RMC Message Received ==="); 
       
       // how much time has passed since last RMC message
       uint32_t time_since_last_RMC_ms = _time_ms - _time_RMC_ms;
       float time_since_last_RMC_sec = (float)time_since_last_RMC_ms / 1000.0f;
-      float freq_since_last_RMC_sec = 1.0f / time_since_last_RMC_sec;
+      float freq_since_last_RMC_sec = 0.0;
+      if(time_since_last_RMC_sec > 0.0) freq_since_last_RMC_sec = 1.0f / time_since_last_RMC_sec;
+
       _time_RMC_ms = _time_ms;
-      if(DEBUG2) 
+      if(DEBUG) 
       {
         Serial.print("time_since_last_RMC_ms = "); Serial.println(time_since_last_RMC_ms);
         Serial.print("freq_since_last_RMC_sec = "); Serial.println(freq_since_last_RMC_sec);
@@ -377,7 +386,7 @@ void loop()
         _isFirstTime = false;
         _enableKF = true;
 
-        // GPS ORIGIN
+        // GPS position
         _lat_prev = GPS.latitudeDegrees;
         _lon_prev = GPS.longitudeDegrees;
 
@@ -394,52 +403,48 @@ void loop()
       //------------------------------------------------------------
       // Compute pos std dev based on GPS quality
       float sigma_p = computeSigmaP(GPS.fixquality, GPS.satellites, GPS.HDOP);
-      if(DEBUG2) {Serial.print("sigma_p = "); Serial.println(sigma_p);}
+      if(DEBUG) {Serial.print("sigma_p = "); Serial.println(sigma_p);}
 
       // lowpass filter sigma to keep filter stable
       const float alpha = 0.2f;
       sigma_p_smoothed = (1.0f - alpha) * sigma_p_smoothed + alpha * sigma_p;
-      if(DEBUG2) {Serial.print("sigma_p_smoothed = "); Serial.println(sigma_p_smoothed);}
+      if(DEBUG) {Serial.print("sigma_p_smoothed = "); Serial.println(sigma_p_smoothed);}
       
       // update measurement uncertainty R
       _kf.setR_measurement(sigma_p_smoothed, _sigma_v);
       
 
       //------------------------------------------------------------
-      // compute change in linear distance from GPS measurements
+      // compute change in distance between subsequent GPS measurements
       float gpsDeltaDist_m = haversineDistance_m(_lat_prev, _lon_prev, GPS.latitudeDegrees, GPS.longitudeDegrees);
       gpsDist_m += abs(gpsDeltaDist_m); // always increasing
       _lat_prev = GPS.latitudeDegrees;
       _lon_prev = GPS.longitudeDegrees;
+      if(DEBUG) {Serial.print("gpsDist_m = "); Serial.println(gpsDist_m);}
       
 
       //------------------------------------------------------------
       // GPS Speed
-      gpsSpd_mps = GPS.speed * KNTS2MPS;
-      if(DEBUG2) {Serial.print("gpsDist_m = "); Serial.println(gpsDist_m);}
-      if(DEBUG2) {Serial.print("gpsSpd_mps = "); Serial.println(gpsSpd_mps);}
+      gpsSpd_mps = GPS.speed * KNTS2MPS;      
+      if(DEBUG) {Serial.print("gpsSpd_mps = "); Serial.println(gpsSpd_mps);}      
 
       // max speed we have seen so far
       if( gpsSpd_mps > gpsSpdMax_mps )
       {
         gpsSpdMax_mps = gpsSpd_mps;
       }
-      if(DEBUG2) {Serial.print("gpsSpdMax_mps = "); Serial.println(gpsSpdMax_mps);}
+      if(DEBUG) {Serial.print("gpsSpdMax_mps = "); Serial.println(gpsSpdMax_mps);}
 
-      // deadband for practical GPS speed (it never goes to zero with real GPS measurements)
+      // minimum GPS speed that is reliable given the number of satellites
       float minGpsSpeed = minSpeedBasedonSatellites(GPS.satellites);
-      // if( gpsSpd_mps < minGpsSpeed )
-      // {
-      //   gpsSpd_mps = 0.0f;
-      // }
-      // if(DEBUG2) {Serial.print("gpsSpd_mps = "); Serial.println(gpsSpd_mps);}
-
+ 
       // Update Drag FSM speeds for the different states
       _dragFSM.setStopThresholdMps( minGpsSpeed + 0.0 );
-      _dragFSM.setStartThresholdMps(minGpsSpeed + 0.1 );
+      _dragFSM.setStartThresholdMps(minGpsSpeed + 0.1 ); // a little higher to provide some hystersis
 
 
       //------------------------------------------------------------
+      // This section allows for testing the code even if the GPS is stationary
       if( TEST )
       {
         unsigned long t1 = 25;
@@ -447,36 +452,36 @@ void loop()
         unsigned long t3 = t2 + 75;
         const float DV = 0.4; 
         float speed;
-        if (_counter < t1)
+        if (_testCnt < t1)
         {
           speed = 0.0; // stop
           gpsDist_m = 0.0;
         }
-        else if (_counter < t2)
+        else if (_testCnt < t2)
         {
           // Accelerate
-          unsigned long k = _counter - t1;
+          unsigned long k = _testCnt - t1;
           speed = k * DV;
           gpsDist_m = k * DV * 0.05;
         }
-        else if (_counter < t3)
+        else if (_testCnt < t3)
         {
           // Decelerate
-          //unsigned long k = _counter - t2;
+          //unsigned long k = _testCnt - t2;
           //speed = -k * DV;
           //if (speed < 0.0) speed = 0.0;
           speed = 0.0;   
           gpsDist_m = (t3-t2) * DV * 0.05;
         }
-        else // _counter > t3
+        else // _testCnt > t3
         {
           // Done: restart cycle
           Serial.print("COUNTER REST");
-          _counter = 0;
+          _testCnt = 0;
           speed = 0.0;
         }
-        _counter++;
-        //Serial.print("_counter = "); Serial.print(_counter); Serial.print("  speed = "); Serial.println(speed);
+        _testCnt++;
+        //Serial.print("_testCnt = "); Serial.print(_testCnt); Serial.print("  speed = "); Serial.println(speed);
         gpsSpd_mps += speed;
       }
 
@@ -484,31 +489,23 @@ void loop()
       //------------------------------------------------------------
       // Run KF PREDICT if enough time has passed
       float dt = (_time_ms - _timeKF_ms) / 1000.0f;
-      if(DEBUG2) {Serial.print("dt = "); Serial.println(dt);}
+      if(DEBUG) {Serial.print("dt = "); Serial.println(dt);}
       if( dt > 0.005 ) // ignore if we just did a predict
       {
         _timeKF_ms = _time_ms;
         _kf.predict(dt);
-        if(DEBUG2) Serial.println("KF Predict");
+        if(DEBUG) Serial.println("KF Predict");
       }
       else
       {
-        if(DEBUG2) Serial.println("Skipping KF predict");
+        if(DEBUG) Serial.println("Skipping KF predict");
       }
 
 
       //------------------------------------------------------------
       // Run KF UPDATE to fuse new measurements
       _kf.update(gpsDist_m, gpsSpd_mps);      
-      if(DEBUG2) Serial.println("KF Update");
-
-
-      if(DEBUG2)
-      {
-        uint32_t time_gps_process_stop_ms =  millis();
-        uint32_t time_gps_process_total_ms =  time_gps_process_stop_ms - time_gps_process_start_ms;
-        Serial.print("time_gps_process_total_ms = "); Serial.println(time_gps_process_total_ms);
-      }
+      if(DEBUG) Serial.println("KF Update");
     }
 
 
@@ -519,7 +516,7 @@ void loop()
     //===============================================================
     if( _time_ms - _timeProcess_ms > _processPeriod_ms )
     {
-      if(DEBUG2) Serial.println("=== Process Loop ==="); 
+      if(DEBUG) Serial.println("=== Process Loop ==="); 
       _timeProcess_ms  = _time_ms;
 
       //------------------------------------------------------------
@@ -529,21 +526,21 @@ void loop()
         //------------------------------------------------------------
         // Kalman Filter Predict
         float dt = (_time_ms - _timeKF_ms) / 1000.0f;
-        if(DEBUG2) {Serial.print("dt = "); Serial.println(dt);}
+        if(DEBUG) {Serial.print("dt = "); Serial.println(dt);}
         if( dt > 0.005 ) // ignore if we just did a predict
         {      
           _timeKF_ms = _time_ms;
           _kf.predict(dt);
-          if(DEBUG2) Serial.println("KF Predict"); 
+          if(DEBUG) Serial.println("KF Predict"); 
         }
         else
         {
-          if(DEBUG2) Serial.println("Skipping KF predict");
+          if(DEBUG) Serial.println("Skipping KF predict");
         }
         float distKF_m = _kf.position();
         float spdKF_mps = _kf.velocity();
-        if(DEBUG2) {Serial.print("distKF_m = "); Serial.println(distKF_m);}
-        if(DEBUG2) {Serial.print("spdKF_mps = "); Serial.println(spdKF_mps);}
+        if(DEBUG) {Serial.print("distKF_m = "); Serial.println(distKF_m);}
+        if(DEBUG) {Serial.print("spdKF_mps = "); Serial.println(spdKF_mps);}
 
       
         //--------------------------------------------------------
