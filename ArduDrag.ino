@@ -263,7 +263,7 @@ float _processPeriod_sec = 1.0f / _processRate_hz;
 unsigned long _processPeriod_ms = 1000.0f * _processPeriod_sec;
 
 unsigned long _blinkPeriod_ms = 1000; // 1Hz
-unsigned long _printPeriod_ms = 1000; // 1Hz
+unsigned long _printPeriod_ms = 2000; // 1Hz
 
 uint32_t _time_ms        = millis();  // number of milliseconds since the program started
 uint32_t _timeLED_ms     = millis(); 
@@ -288,8 +288,9 @@ unsigned int minSatellites = 6;
 DragFSM _dragFSM(&Serial);
 
 bool DEBUG = false;
-bool TEST = true;
+bool TEST = false;
 uint32_t _testCnt = 0;
+float _testDist = 0.0f;
 
 //------------------------------------------------------------
 KalmanFilter _kf;
@@ -412,16 +413,7 @@ void loop()
       
       // update measurement uncertainty R
       _kf.setR_measurement(sigma_p_smoothed, _sigma_v);
-      
 
-      //------------------------------------------------------------
-      // compute change in distance between subsequent GPS measurements
-      float gpsDeltaDist_m = haversineDistance_m(_lat_prev, _lon_prev, GPS.latitudeDegrees, GPS.longitudeDegrees);
-      gpsDist_m += abs(gpsDeltaDist_m); // always increasing
-      _lat_prev = GPS.latitudeDegrees;
-      _lon_prev = GPS.longitudeDegrees;
-      if(DEBUG) {Serial.print("gpsDist_m = "); Serial.println(gpsDist_m);}
-      
 
       //------------------------------------------------------------
       // GPS Speed
@@ -441,48 +433,73 @@ void loop()
       // Update Drag FSM speeds for the different states
       _dragFSM.setStopThresholdMps( minGpsSpeed + 0.0 );
       _dragFSM.setStartThresholdMps(minGpsSpeed + 0.1 ); // a little higher to provide some hystersis
+      
 
+      //------------------------------------------------------------
+      // Compute change in distance between subsequent GPS measurements
+      float gpsDeltaDist_m = haversineDistance_m(_lat_prev, _lon_prev, GPS.latitudeDegrees, GPS.longitudeDegrees);
+
+      // Update previous position every time
+      _lat_prev = GPS.latitudeDegrees;
+      _lon_prev = GPS.longitudeDegrees;
+
+      // Filter out big GPS jumps (anti-spike)
+      const float MAX_STEP_M = 20.0f;
+      if (gpsDeltaDist_m >= 0.0f && gpsDeltaDist_m < MAX_STEP_M)
+      {
+        // Only accumulate distance if we believe we’re actually moving
+        if (gpsSpd_mps > minGpsSpeed)
+        {
+          gpsDist_m += gpsDeltaDist_m;  // monotonic
+        }
+      } 
+      else 
+      {
+          Serial.print("GPS jump ignored: "); Serial.println(gpsDeltaDist_m);
+      }      
+      if(DEBUG) {Serial.print("gpsDist_m = "); Serial.println(gpsDist_m);}
+      
 
       //------------------------------------------------------------
       // This section allows for testing the code even if the GPS is stationary
       if( TEST )
       {
         unsigned long t1 = 25;
-        unsigned long t2 = t1 + 75;
-        unsigned long t3 = t2 + 75;
-        const float DV = 0.4; 
-        float speed;
+        //unsigned long t2 = t1 + 50; // 0-60 test
+        unsigned long t2 = t1 + 150; // 1/4 mile test
+        unsigned long t3 = t2 + 25;
+        const float dV = 0.5; 
+        float testSpeed = 0.0;
+        float dt_sec = 0.1; // 10 Hz
         if (_testCnt < t1)
         {
-          speed = 0.0; // stop
-          gpsDist_m = 0.0;
+          testSpeed = 0.0; // stop
         }
         else if (_testCnt < t2)
         {
           // Accelerate
           unsigned long k = _testCnt - t1;
-          speed = k * DV;
-          gpsDist_m = k * DV * 0.05;
+          testSpeed = k * dV;
         }
         else if (_testCnt < t3)
         {
-          // Decelerate
-          //unsigned long k = _testCnt - t2;
-          //speed = -k * DV;
-          //if (speed < 0.0) speed = 0.0;
-          speed = 0.0;   
-          gpsDist_m = (t3-t2) * DV * 0.05;
+          // Stop
+          testSpeed = 0.0;   
         }
         else // _testCnt > t3
         {
           // Done: restart cycle
-          Serial.print("COUNTER REST");
           _testCnt = 0;
-          speed = 0.0;
-        }
+        }        
         _testCnt++;
-        //Serial.print("_testCnt = "); Serial.print(_testCnt); Serial.print("  speed = "); Serial.println(speed);
-        gpsSpd_mps += speed;
+        //Serial.print("_testCnt = "); Serial.print(_testCnt); 
+        //Serial.print("  testSpeed = "); Serial.print(testSpeed);
+        //Serial.print("  _testDist = "); Serial.println(_testDist);
+                
+        _testDist += testSpeed * dt_sec; // integrate
+        gpsDist_m = _testDist;
+        
+        gpsSpd_mps = testSpeed;
       }
 
 

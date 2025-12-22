@@ -50,41 +50,77 @@ public:
     DRAG_FINISHED      = 3
   };
 
-  struct DragTiming
+  struct DragStatus
   {
     // default state 
     DragState state = DRAG_WAIT_FOR_STOP; 
 
-    // Run time bookkeeping (derived from now_ms)
+    // stop detection timer (arming/abort/reset)
+    uint32_t stopStart_ms     = 0;
+    bool     stopTimerRunning = false;
+  };
+
+  struct DragLog
+  {
+    // Run time bookkeeping
     uint32_t startTime_ms = 0;        // system time at launch
     float    startDistance_m = 0.0f;  // global distance at launch
     float    maxSpeed_mps = 0.0f;
 
-    // 0-60 mph results
-    bool  has_0_60    = false;
-    float t_0_60_sec  = 0.0f;
-    float v_0_60_mps  = 0.0f;
+    // 1) 0–60 mph time, mph, and distance
+    bool  has_0_60   = false;
+    float t_0_60_sec = 0.0f;
+    float v_0_60_mps = 0.0f;
+    float d_0_60_m   = 0.0f;
 
-    // 1/4 mile results
-    bool  has_quarter       = false;
-    float t_quarter_sec     = 0.0f;
-    float v_quarter_mps     = 0.0f;
-    float dist_quarter_m    = 0.0f; // captured input distance at completion
+    // 2) 60 ft time and mph
+    bool  has_60ft   = false;
+    float t_60ft_sec = 0.0f;
+    float v_60ft_mps = 0.0f;
 
-    // stop detection timer (arming/abort/reset)
-    uint32_t stopStart_ms    = 0;
-    bool     stopTimerRunning = false;
+    // 3) 330 ft time and mph
+    bool  has_330ft   = false;
+    float t_330ft_sec = 0.0f;
+    float v_330ft_mps = 0.0f;
+
+    // 4) 660 ft (1/8 mile ET) time and mph
+    bool  has_660ft   = false;
+    float t_660ft_sec = 0.0f;
+    float v_660ft_mps = 0.0f;
+
+    // 5) 1000 ft time and mph
+    bool  has_1000ft   = false;
+    float t_1000ft_sec = 0.0f;
+    float v_1000ft_mps = 0.0f;
+
+    // 6) 1320 ft (1/4 mile) time and mph
+    bool  has_quarter    = false;
+    float t_quarter_sec  = 0.0f;
+    float v_quarter_mps  = 0.0f;
+    float dist_quarter_m = 0.0f; // captured input distance at completion
   };
 
   //==========================================================================================
   // Constants / conversions
   //==========================================================================================
-  static constexpr float MPS2MPH = 2.23693629f;  
-  static constexpr float MILE2MTR = 1609.34f;
-  static constexpr float MTR2FT = 3.28084f;
-  static constexpr float QTR_MILE_IN_MTR = 402.336f;
-  static constexpr float QTR_MILE_IN_FT = 1320.0f;
-  
+  static constexpr float MPS2MPH       = 2.23693629f;  
+  static constexpr float MILE2MTR      = 1609.34f;
+  static constexpr float MTR2FT        = 3.28084f;
+
+  // Distances in feet
+  static constexpr float DIST_60FT_FT   = 60.0f;
+  static constexpr float DIST_330FT_FT  = 330.0f;
+  static constexpr float DIST_660FT_FT  = 660.0f;
+  static constexpr float DIST_1000FT_FT = 1000.0f;
+  static constexpr float DIST_1320FT_FT = 1320.0f;
+
+  // Same distances in meters
+  static constexpr float DIST_60FT_M   = DIST_60FT_FT   / MTR2FT;
+  static constexpr float DIST_330FT_M  = DIST_330FT_FT  / MTR2FT;
+  static constexpr float DIST_660FT_M  = DIST_660FT_FT  / MTR2FT;
+  static constexpr float DIST_1000FT_M = DIST_1000FT_FT / MTR2FT;
+  static constexpr float QTR_MILE_IN_FT  = DIST_1320FT_FT;
+  static constexpr float QTR_MILE_IN_MTR = DIST_1320FT_FT / MTR2FT;  
 
   static constexpr float TARGET_60_MPH = 60.0f;
   static constexpr float TARGET_60_MPS = TARGET_60_MPH / MPS2MPH;
@@ -111,7 +147,8 @@ public:
   //==========================================================================================
   void reset()
   {
-    _drag = DragTiming{}; // sets DRAG_WAIT_FOR_STOP and stopStart_ms = 0
+    _dragStatus = DragStatus{}; // sets DRAG_WAIT_FOR_STOP and stopStart_ms = 0
+    _dragLog = DragLog{}; // clear log data
     _Serial->println("DRAG::Reset()");
   }
 
@@ -126,23 +163,28 @@ public:
    */
   void update(uint32_t now_ms, bool navDataGood, float speedKF_mps, float distance_m, float speedGPS_mps)
   {
+    //_Serial->print("DragFSM::update() -> distance_m = "); _Serial->println(distance_m);
+
     // Select which speed source to use
     float speed_mps = speedKF_mps; // Use KF speed
     //float speed_mps = speedGPS_mps;  // Use GPS speed
 
+    // convert to mph
     const float speed_mph = speed_mps * MPS2MPH;
     const float speedKF_mph = speedKF_mps * MPS2MPH; 
     const float speedGPS_mph = speedGPS_mps * MPS2MPH;
     
-    const float distanceRun_m = distance_m - _drag.startDistance_m;
+    // distance
+    const float distanceRun_m = distance_m - _dragLog.startDistance_m;
+    //float distanceRun_ft = distanceRun_m * MTR2FT;
 
     // Data quality gating
     if (!navDataGood)
     {      
-      _drag.stopTimerRunning = false;
+      _dragStatus.stopTimerRunning = false;
 
       // Stop and reset if we are actively running
-      if (_drag.state == DRAG_RUNNING)
+      if (_dragStatus.state == DRAG_RUNNING)
       {
         // EVENT: GPS is bad
         _Serial->println("-> Nav data invalid, ABORTING RUN");
@@ -151,7 +193,7 @@ public:
       return;
     }
 
-    switch (_drag.state)
+    switch (_dragStatus.state)
     {
       case DRAG_WAIT_FOR_STOP:
       {
@@ -161,13 +203,13 @@ public:
 
         if( !isStoppedLongEnough )
         {
-          if( _drag.stopTimerRunning )
+          if( _dragStatus.stopTimerRunning )
           {
             // stopped but not for long enough
             if( DEBUG )
             {              
               _Serial->print(" Stopped ");
-              _Serial->print(" time_ms "); _Serial->print(now_ms-_drag.stopStart_ms);
+              _Serial->print(" time_ms "); _Serial->print(now_ms-_dragStatus.stopStart_ms);
               _Serial->print(" timeout_ms "); _Serial->print(_minStopTime_ms);     
               _Serial->println("");         
             }
@@ -189,7 +231,7 @@ public:
         else
         {
           // EVENT: detected complete stop for long enough
-          _drag.state = DRAG_ARMED;
+          _dragStatus.state = DRAG_ARMED;
           _Serial->println("");
           _Serial->println("**************************************************************");
           _Serial->println("-> Armed (vehicle stopped, nav data OK)");
@@ -217,21 +259,21 @@ public:
         else if (speed_mps >= _speedStartThreshold_mps)
         {
           // EVENT: detected movement
-          _drag.state = DRAG_RUNNING;
+          _dragStatus.state = DRAG_RUNNING;
           _Serial->println("Movement Detected --> Changing to DRAG_RUNNING");
 
           // initialize drag info
           uint32_t timeStep_ms = 50;
           uint32_t offsetSteps = 4;
           uint32_t timeOffset_ms = offsetSteps*timeStep_ms;
-          _drag.startTime_ms = now_ms - timeOffset_ms; // remember time we started
-          _drag.startDistance_m = distance_m;          // remember where we started
-          _drag.maxSpeed_mps = speed_mps;
 
-          _drag.has_0_60 = false;
-          _drag.has_quarter = false;
+          _dragLog = DragLog{};                           // clear previous run data
+          _dragLog.startTime_ms = now_ms - timeOffset_ms; // remember time we started
+          _dragLog.startDistance_m = distance_m;          // remember where we started
+          _dragLog.maxSpeed_mps = speed_mps;
 
-          _drag.stopTimerRunning = false;
+          // reset stop timer flag
+          _dragStatus.stopTimerRunning = false;
         }
         else
         {
@@ -248,59 +290,132 @@ public:
         _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mph, 2);
         _Serial->print(" SPD_mph "); _Serial->print(speed_mph, 2);
         _Serial->print(" Dist_ft "); _Serial->print(distanceRun_m*MTR2FT, 1);
-        //_Serial->print(" of "); _Serial->print(QTR_MILE_IN_FT, 1);
         _Serial->println("");
 
         // Track max speed
-        if (speed_mps > _drag.maxSpeed_mps)
+        if (speed_mps > _dragLog.maxSpeed_mps)
         {
-          _drag.maxSpeed_mps = speed_mps;
+          _dragLog.maxSpeed_mps = speed_mps;
         }
 
-        // 0-60 mph timing
-        if (!_drag.has_0_60 && (speed_mps >= TARGET_60_MPS))
+        // 1) 0-60 mph timing
+        if (!_dragLog.has_0_60 && (speed_mps >= TARGET_60_MPS))
         {
-          // EVENT: Reached end of quarter mile
-          _drag.state = DRAG_FINISHED;
+          // EVENT: Reached 60 mph (early exit for testing)
+          //_dragStatus.state = DRAG_FINISHED;
 
-          _drag.has_0_60 = true;
-          _drag.t_0_60_sec = elapsedSec(now_ms);
-          _drag.v_0_60_mps = speed_mps;
+          // data
+          _dragLog.has_0_60   = true;
+          _dragLog.t_0_60_sec = elapsedSec(now_ms);
+          _dragLog.v_0_60_mps = speed_mps;
+          _dragLog.d_0_60_m   = distanceRun_m;  // capture distance at 60 mph
 
           _Serial->println("**************************************************************");
           _Serial->print("-> 0-"); _Serial->print(TARGET_60_MPH,0); _Serial->print(" mph in ");
-          _Serial->print(_drag.t_0_60_sec, 3);
-          //_Serial->print(" sec, speed = ");
-          //_Serial->print(speed_mph, 2);
-          //_Serial->print(" mph, dist = ");
+          _Serial->print(_dragLog.t_0_60_sec, 3);
           _Serial->print(" sec, dist = ");
-          _Serial->print(distanceRun_m*MTR2FT);
+          _Serial->print(_dragLog.d_0_60_m * MTR2FT);
           _Serial->println(" ft");
           _Serial->println("**************************************************************");
         }
 
-        // // DISABLED
-        // // 1/4 mile completion
-        // if (!_drag.has_quarter && (distanceRun_m >= QTR_MILE_IN_MTR))
-        // {
-        //   // EVENT: Reached end of quarter mile
-        //   _drag.state = DRAG_FINISHED;
+        // 2) 60 ft time and mph
+        if (!_dragLog.has_60ft && (distanceRun_m >= DIST_60FT_M))
+        {
+          _dragLog.has_60ft   = true;
+          _dragLog.t_60ft_sec = elapsedSec(now_ms);
+          _dragLog.v_60ft_mps = speed_mps;
 
-        //   _drag.has_quarter = true;
-        //   _drag.t_quarter_sec = elapsedSec(now_ms);
-        //   _drag.v_quarter_mps = speed_mps;
-        //   _drag.dist_quarter_m = distanceRun_m;         
-        // }
+          _Serial->println("**************************************************************");
+          _Serial->print("-> 60 ft in ");
+          _Serial->print(_dragLog.t_60ft_sec, 3);
+          _Serial->print(" sec @ ");
+          _Serial->print(_dragLog.v_60ft_mps * MPS2MPH, 2);
+          _Serial->println(" mph");
+          _Serial->println("**************************************************************");
+        }
+
+        // 3) 330 ft time and mph
+        if (!_dragLog.has_330ft && (distanceRun_m >= DIST_330FT_M))
+        {
+          _dragLog.has_330ft   = true;
+          _dragLog.t_330ft_sec = elapsedSec(now_ms);
+          _dragLog.v_330ft_mps = speed_mps;
+
+          _Serial->println("**************************************************************");
+          _Serial->print("-> 330 ft in ");
+          _Serial->print(_dragLog.t_330ft_sec, 3);
+          _Serial->print(" sec @ ");
+          _Serial->print(_dragLog.v_330ft_mps * MPS2MPH, 2);
+          _Serial->println(" mph");
+          _Serial->println("**************************************************************");
+        }
+
+        // 4) 660 ft (1/8 mile) time and mph
+        if (!_dragLog.has_660ft && (distanceRun_m >= DIST_660FT_M))
+        {
+          // EVENT: Reached end of 1/8 mile
+          // _dragStatus.state = DRAG_FINISHED;
+
+          _dragLog.has_660ft   = true;
+          _dragLog.t_660ft_sec = elapsedSec(now_ms);
+          _dragLog.v_660ft_mps = speed_mps;
+
+          _Serial->println("**************************************************************");
+          _Serial->print("-> 1/8 mile (660 ft) in ");
+          _Serial->print(_dragLog.t_660ft_sec, 3);
+          _Serial->print(" sec @ ");
+          _Serial->print(_dragLog.v_660ft_mps * MPS2MPH, 2);
+          _Serial->println(" mph");
+          _Serial->println("**************************************************************");
+        }
+
+        // 5) 1000 ft time and mph
+        if (!_dragLog.has_1000ft && (distanceRun_m >= DIST_1000FT_M))
+        {
+          _dragLog.has_1000ft   = true;
+          _dragLog.t_1000ft_sec = elapsedSec(now_ms);
+          _dragLog.v_1000ft_mps = speed_mps;
+
+          _Serial->println("**************************************************************");
+          _Serial->print("-> 1000 ft in ");
+          _Serial->print(_dragLog.t_1000ft_sec, 3);
+          _Serial->print(" sec @ ");
+          _Serial->print(_dragLog.v_1000ft_mps * MPS2MPH, 2);
+          _Serial->println(" mph");
+          _Serial->println("**************************************************************");
+        }
+
+        // 6) 1320 ft (1/4 mile) time and mph --> end of run no matter what
+        if (!_dragLog.has_quarter && (distanceRun_m >= QTR_MILE_IN_MTR))
+        {
+          // EVENT: Reached end of 1/4 mile
+          _dragStatus.state = DRAG_FINISHED;
+
+          _dragLog.has_quarter    = true;
+          _dragLog.t_quarter_sec  = elapsedSec(now_ms);
+          _dragLog.v_quarter_mps  = speed_mps;
+          _dragLog.dist_quarter_m = distanceRun_m;
+
+          _Serial->println("**************************************************************");
+          _Serial->print("-> 1/4 mile (1320 ft) in ");
+          _Serial->print(_dragLog.t_quarter_sec, 3);
+          _Serial->print(" sec @ ");
+          _Serial->print(_dragLog.v_quarter_mps * MPS2MPH, 2);
+          _Serial->println(" mph");
+          _Serial->println("**************************************************************");
+        }
 
         // Abort condition: stop too long before 1/4 mile
-        if (!_drag.has_quarter)
+        if (!_dragLog.has_quarter)
         {
           // Check for stop and that stopped for longer than abortStopTime_ms
           if (updateStopTimer(now_ms, speed_mps, _abortStopTime_ms))
           {
             // EVENT: 
             _Serial->println("**************************************************************");
-            _Serial->println("-> !!! Run aborted (vehicle stopped) !!!");
+            _Serial->println("!!! Run aborted (vehicle stopped) !!!");
+            printRunSummary();
             _Serial->println("**************************************************************");
             reset(); // reset data and state back to DRAG_WAIT_FOR_STOP
           }
@@ -343,8 +458,8 @@ public:
   //==========================================================================================
   // Accessors
   //==========================================================================================
-  const DragTiming& data() const { return _drag; }
-  DragState state() const { return _drag.state; }
+  const DragLog& dataLog() const { return _dragLog; }
+  DragState state() const { return _dragStatus.state; }
 
 private:
   bool DEBUG = false;
@@ -360,7 +475,9 @@ private:
   //==========================================================================================
   // Internal state
   //==========================================================================================
-  DragTiming _drag;
+  DragStatus _dragStatus;
+  DragLog _dragLog;
+
   usb_serial_class* _Serial;
 
   //==========================================================================================
@@ -368,8 +485,8 @@ private:
   //==========================================================================================
   float elapsedSec(uint32_t now_ms) const
   {
-    if (_drag.startTime_ms == 0) return 0.0f;
-    const uint32_t dt_ms = now_ms - _drag.startTime_ms;
+    if (_dragLog.startTime_ms == 0) return 0.0f;
+    const uint32_t dt_ms = now_ms - _dragLog.startTime_ms;
     return dt_ms * 0.001f;
   }
 
@@ -395,18 +512,18 @@ private:
     if (speed_mps < _speedStopThreshold_mps)
     {
       // If the stop timer is not running yet, start it now.
-      if (!_drag.stopTimerRunning)
+      if (!_dragStatus.stopTimerRunning)
       {
-        _drag.stopTimerRunning = true;
-        _drag.stopStart_ms = now_ms;   // record when we first went "stopped"
+        _dragStatus.stopTimerRunning = true;
+        _dragStatus.stopStart_ms = now_ms;   // record when we first went "stopped"
       }
       else
       {
         // Timer is already running: check how long we've been "stopped".
-        if ((now_ms - _drag.stopStart_ms) > timeout_ms)
+        if ((now_ms - _dragStatus.stopStart_ms) > timeout_ms)
         {
           // We've been below the threshold long enough; stop the timer and signal timeout.
-          _drag.stopTimerRunning = false;
+          _dragStatus.stopTimerRunning = false;
           return true;                 // condition satisfied
         }
       }
@@ -414,7 +531,7 @@ private:
     else
     {
       // Speed is above the stop threshold -> cancel any in-progress stop timing.
-      _drag.stopTimerRunning = false;
+      _dragStatus.stopTimerRunning = false;
     }
     // Either not below threshold long enough, or not stopped at all.
     return false;
@@ -424,19 +541,26 @@ private:
   void printRunSummary()
   {
     _Serial->println("==============================================================");
-    _Serial->println("-> Run complete");
-    _Serial->print("-> DRAG_RESULT, ");
-    _Serial->print(", t_0-60="); _Serial->print(_drag.has_0_60 ? _drag.t_0_60_sec : -1.0f, 3);
-    // _Serial->print(", t_quarter="); _Serial->print(_drag.t_quarter_sec, 3);
-    // _Serial->print(", v_0-60_mph=");
-    // _Serial->print(_drag.has_0_60 ? _drag.v_0_60_mps * MPS2MPH : 0.0f, 2);
-    // _Serial->print(", v_quarter_mph=");
-    // _Serial->print(_drag.v_quarter_mps * MPS2MPH, 2);
-    // _Serial->print(", dist_quarter_m=");
-    // _Serial->print(_drag.dist_quarter_m, 2);
-    _Serial->print(", maxSpeed_mph=");
-    _Serial->print(_drag.maxSpeed_mps * MPS2MPH, 2);
-    _Serial->println("");
+    _Serial->println("TIME SLIP: ");
+    
+    _Serial->print("0-60  ... "); _Serial->println(_dragLog.has_0_60 ? _dragLog.t_0_60_sec : -1.0f, 3);
+    _Serial->print("DIST  ... "); _Serial->println(_dragLog.has_0_60 ? _dragLog.d_0_60_m*MTR2FT : -1.0f, 1);
+
+    _Serial->print("60'   ... "); _Serial->println(_dragLog.t_60ft_sec, 3);
+    _Serial->print("MPH   ... "); _Serial->println(_dragLog.v_60ft_mps * MPS2MPH, 2);
+
+    _Serial->print("330'  ... "); _Serial->println(_dragLog.t_330ft_sec, 3);
+    _Serial->print("MPH   ... "); _Serial->println(_dragLog.v_330ft_mps * MPS2MPH, 2);
+
+    _Serial->print("1/8   ... "); _Serial->println(_dragLog.t_660ft_sec, 3);
+    _Serial->print("MPH   ... "); _Serial->println(_dragLog.v_660ft_mps * MPS2MPH, 2);
+
+    _Serial->print("1000' ... "); _Serial->println(_dragLog.t_1000ft_sec, 3);
+    _Serial->print("MPH   ... "); _Serial->println(_dragLog.v_1000ft_mps * MPS2MPH, 2);
+    
+    _Serial->print("1/4   ... "); _Serial->println(_dragLog.t_quarter_sec, 3);
+    _Serial->print("MPH   ... "); _Serial->println(_dragLog.v_quarter_mps * MPS2MPH, 2);
+
     _Serial->println("==============================================================");
     _Serial->println("");
   }
