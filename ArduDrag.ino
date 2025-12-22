@@ -431,8 +431,13 @@ void loop()
       float minGpsSpeed = minSpeedBasedonSatellites(GPS.satellites);
  
       // Update Drag FSM speeds for the different states
-      _dragFSM.setStopThresholdMps( minGpsSpeed + 0.0 );
-      _dragFSM.setStartThresholdMps(minGpsSpeed + 0.1 ); // a little higher to provide some hystersis
+      //_dragFSM.setStopThresholdMps( minGpsSpeed + 0.0 );
+      //_dragFSM.setStartThresholdMps(minGpsSpeed + 0.1 ); // a little higher to provide some hystersis
+
+      // use a consistant fixed speed threshold, especially for starting to eliminate any roll out issues. DragFSM will compensate for this in timing.
+      float speedThresh_mph = 2.2;
+      _dragFSM.setStopThresholdMps( speedThresh_mph/MPS2MPH - 0.1 );
+      _dragFSM.setStartThresholdMps(speedThresh_mph/MPS2MPH + 0.0 ); 
       
 
       //------------------------------------------------------------

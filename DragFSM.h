@@ -263,13 +263,12 @@ public:
           _Serial->println("Movement Detected --> Changing to DRAG_RUNNING");
 
           // initialize drag info
-          uint32_t timeStep_ms = 50;
-          uint32_t offsetSteps = 4;
-          uint32_t timeOffset_ms = offsetSteps*timeStep_ms;
+          uint32_t timeOffset_ms = 200; // compenstate for the short time it took to cross the speed threshold
+          float posOffset_m = 0.2;
 
           _dragLog = DragLog{};                           // clear previous run data
           _dragLog.startTime_ms = now_ms - timeOffset_ms; // remember time we started
-          _dragLog.startDistance_m = distance_m;          // remember where we started
+          _dragLog.startDistance_m = distance_m - posOffset_m; // remember where we started
           _dragLog.maxSpeed_mps = speed_mps;
 
           // reset stop timer flag
