@@ -155,7 +155,7 @@ public:
     {
       case DRAG_WAIT_FOR_STOP:
       {
-        _Serial->print("DRAG_WAIT_FOR_STOP:");
+        if( DEBUG ) _Serial->print("DRAG_WAIT_FOR_STOP:");
 
         bool isStoppedLongEnough = updateStopTimer(now_ms, speed_mps, _minStopTime_ms);
 
@@ -164,21 +164,27 @@ public:
           if( _drag.stopTimerRunning )
           {
             // stopped but not for long enough
-            _Serial->print(" Stopped ");
-            _Serial->print(" time_ms "); _Serial->print(now_ms-_drag.stopStart_ms);
-            _Serial->print(" timeout_ms "); _Serial->print(_minStopTime_ms);
-            _Serial->println("");
+            if( DEBUG )
+            {              
+              _Serial->print(" Stopped ");
+              _Serial->print(" time_ms "); _Serial->print(now_ms-_drag.stopStart_ms);
+              _Serial->print(" timeout_ms "); _Serial->print(_minStopTime_ms);     
+              _Serial->println("");         
+            }
           }
           else
           {
             // not stopped yet
-            _Serial->print(" Moving ");
-            _Serial->print(" KF_mph "); _Serial->print(speedKF_mph, 2);
-            _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mph, 2);
-            _Serial->print(" SPD_mph "); _Serial->print(speed_mph, 2);
-            _Serial->print(" Threshold_MPH "); _Serial->print(_speedStopThreshold_mps*MPS2MPH, 2); 
-            _Serial->println("");
-          }
+            if( DEBUG )
+            {
+              _Serial->print(" Moving ");
+              _Serial->print(" KF_mph "); _Serial->print(speedKF_mph, 2);
+              _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mph, 2);
+              _Serial->print(" SPD_mph "); _Serial->print(speed_mph, 2);
+              _Serial->print(" Threshold_MPH "); _Serial->print(_speedStopThreshold_mps*MPS2MPH, 2);               
+              _Serial->println("");
+            }
+          }          
         }
         else
         {
@@ -195,11 +201,14 @@ public:
 
       case DRAG_ARMED:
       {
-        _Serial->print("DRAG_ARMED:");
-        _Serial->print(" KF_mph "); _Serial->print(speedKF_mph, 2);
-        _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mph, 2);
-        _Serial->print(" SPD_mph "); _Serial->print(speed_mph, 2);
-        _Serial->print(" Threshold_MPH "); _Serial->println(_speedStartThreshold_mps*MPS2MPH, 2);        
+        if( DEBUG )
+        {
+          _Serial->print("DRAG_ARMED:");
+          _Serial->print(" KF_mph "); _Serial->print(speedKF_mph, 2);
+          _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mph, 2);
+          _Serial->print(" SPD_mph "); _Serial->print(speed_mph, 2);
+          _Serial->print(" Threshold_MPH "); _Serial->println(_speedStartThreshold_mps*MPS2MPH, 2);
+        }
 
         if (speed_mps < _speedStopThreshold_mps)
         {
@@ -223,24 +232,16 @@ public:
           _drag.has_quarter = false;
 
           _drag.stopTimerRunning = false;
-
-          // _Serial->print("-> Run started at t_ms = ");
-          // _Serial->print(now_ms);
-          // _Serial->print(", speed = ");
-          // _Serial->print(speed_mph, 2);
-          // _Serial->println(" mph");
         }
         else
         {
-          // > stop but less than start threadhold (small creep, not enough to start)
+          // > stop speed but less than start threadhold (small creep, not enough to start)
         }
         break;
       }
 
       case DRAG_RUNNING:
       {
-        //const float distanceRun_m = distance_m - _drag.startDistance_m;
-
         _Serial->print("DRAG_RUNNING:");
         _Serial->print(" time "); _Serial->print(elapsedSec(now_ms), 2);
         _Serial->print(" KF_mph "); _Serial->print(speedKF_mph, 2);
@@ -278,27 +279,28 @@ public:
           _Serial->println("**************************************************************");
         }
 
-        // DISABLED
-        // 1/4 mile completion
-        if (!_drag.has_quarter && (distanceRun_m >= QTR_MILE_IN_MTR))
-        {
-          // EVENT: Reached end of quarter mile
-          _drag.state = DRAG_FINISHED;
+        // // DISABLED
+        // // 1/4 mile completion
+        // if (!_drag.has_quarter && (distanceRun_m >= QTR_MILE_IN_MTR))
+        // {
+        //   // EVENT: Reached end of quarter mile
+        //   _drag.state = DRAG_FINISHED;
 
-          _drag.has_quarter = true;
-          _drag.t_quarter_sec = elapsedSec(now_ms);
-          _drag.v_quarter_mps = speed_mps;
-          _drag.dist_quarter_m = distanceRun_m;         
-        }
+        //   _drag.has_quarter = true;
+        //   _drag.t_quarter_sec = elapsedSec(now_ms);
+        //   _drag.v_quarter_mps = speed_mps;
+        //   _drag.dist_quarter_m = distanceRun_m;         
+        // }
 
         // Abort condition: stop too long before 1/4 mile
         if (!_drag.has_quarter)
         {
+          // Check for stop and that stopped for longer than abortStopTime_ms
           if (updateStopTimer(now_ms, speed_mps, _abortStopTime_ms))
           {
             // EVENT: 
             _Serial->println("**************************************************************");
-            _Serial->println("-> !!! Run aborted (vehicle stopped/slowed before 1/4 mile) !!!");
+            _Serial->println("-> !!! Run aborted (vehicle stopped) !!!");
             _Serial->println("**************************************************************");
             reset(); // reset data and state back to DRAG_WAIT_FOR_STOP
           }
@@ -324,10 +326,11 @@ public:
         //   _Serial->println("**************************************************************");
         //   reset();
         // }
-        _Serial->println("DRAG_FINISHED: ");
+
+        _Serial->println("DRAG_FINISHED: Come to a stop to arm for another run");
         printRunSummary();      
         reset(); // sets DRAG_WAIT_FOR_STOP and stopStart_ms = 0
-        updateStopTimer(now_ms, speed_mps, _minStopTime_ms); // need to update 
+        updateStopTimer(now_ms, speed_mps, _minStopTime_ms);
         break;
       }
 
@@ -344,6 +347,8 @@ public:
   DragState state() const { return _drag.state; }
 
 private:
+  bool DEBUG = false;
+
   //==========================================================================================
   // Internal configuration (defaults match original intent)
   //==========================================================================================
@@ -418,23 +423,21 @@ private:
 
   void printRunSummary()
   {
-    _Serial->println("**************************************************************");
-    _Serial->println("**************************************************************");
+    _Serial->println("==============================================================");
     _Serial->println("-> Run complete");
     _Serial->print("-> DRAG_RESULT, ");
     _Serial->print(", t_0-60="); _Serial->print(_drag.has_0_60 ? _drag.t_0_60_sec : -1.0f, 3);
-    _Serial->print(", t_quarter="); _Serial->print(_drag.t_quarter_sec, 3);
-    _Serial->print(", v_0-60_mph=");
-    _Serial->print(_drag.has_0_60 ? _drag.v_0_60_mps * MPS2MPH : 0.0f, 2);
-    _Serial->print(", v_quarter_mph=");
-    _Serial->print(_drag.v_quarter_mps * MPS2MPH, 2);
-    _Serial->print(", dist_quarter_m=");
-    _Serial->print(_drag.dist_quarter_m, 2);
+    // _Serial->print(", t_quarter="); _Serial->print(_drag.t_quarter_sec, 3);
+    // _Serial->print(", v_0-60_mph=");
+    // _Serial->print(_drag.has_0_60 ? _drag.v_0_60_mps * MPS2MPH : 0.0f, 2);
+    // _Serial->print(", v_quarter_mph=");
+    // _Serial->print(_drag.v_quarter_mps * MPS2MPH, 2);
+    // _Serial->print(", dist_quarter_m=");
+    // _Serial->print(_drag.dist_quarter_m, 2);
     _Serial->print(", maxSpeed_mph=");
     _Serial->print(_drag.maxSpeed_mps * MPS2MPH, 2);
     _Serial->println("");
-    _Serial->println("**************************************************************");
-    _Serial->println("**************************************************************");
+    _Serial->println("==============================================================");
     _Serial->println("");
   }
 };

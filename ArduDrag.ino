@@ -288,7 +288,7 @@ unsigned int minSatellites = 6;
 DragFSM _dragFSM(&Serial);
 
 bool DEBUG = false;
-bool TEST = false;
+bool TEST = true;
 uint32_t _testCnt = 0;
 
 //------------------------------------------------------------
