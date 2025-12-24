@@ -291,6 +291,16 @@ public:
           _Serial->print(" Dist_ft "); _Serial->print(distanceRun_m*MTR2FT, 1);
           _Serial->println("");
         }
+        else
+        {
+          PRINT = !PRINT;
+          if( PRINT )
+          {
+            _Serial->print("KF "); _Serial->print(speedKF_mph, 2);
+            _Serial->print(" GPS "); _Serial->print(speedGPS_mph, 2);
+            _Serial->println("");
+          }
+        }
 
         // Track max speed
         if (speed_mps > _dragLog.maxSpeed_mps)
@@ -464,6 +474,7 @@ public:
 private:
   bool DEBUG = false;
   bool DEBUG2 = false;
+  bool PRINT = false;
 
   //==========================================================================================
   // Internal configuration (defaults match original intent)
