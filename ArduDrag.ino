@@ -82,27 +82,53 @@ void setupGPS()
 // Read data from the GPS serial port in the 'main loop'.
 // Need to call as fast as possible as the GPS.read() only reads one character at at time from the serial port.
 // Returns an int value that corresponds to parsing result: NA=0, FAIL=1, RMC=2, GGA=3, OTHER=4
-int readGPS()
-{  
-  int rVal = 0;  // NA --> no new sentence parsed
+// int readGPS()
+// {  
+//   int rVal = 0;  // NA --> no new sentence parsed
 
-  // reads one character from the GPS serial stream and feeds it into the library’s internal NMEA sentence buffer
-  GPS.read();
+//   // reads one character from the GPS serial stream and feeds it into the library’s internal NMEA sentence buffer
+//   GPS.read();
   
-  // Check if  NMEA message is ready to parse
-  if( GPS.newNMEAreceived() ) 
-  {
-    // full NMEA sentence has been received and is read to be parsed --> NEW DATA    
-    if( strcmp(GPS.thisSentence,"RMC") == 0 ) rVal = 2;      // RMC = lat/lon/sog/cog/magVar
-    else if( strcmp(GPS.thisSentence,"GGA") == 0 ) rVal = 3; // GGA = lat/lon/alt/qual/sats
-    else rVal = 4;
+//   // Check if  NMEA message is ready to parse
+//   if( GPS.newNMEAreceived() ) 
+//   {
+//     // full NMEA sentence has been received and is read to be parsed --> NEW DATA    
+//     if( strcmp(GPS.thisSentence,"RMC") == 0 ) rVal = 2;      // RMC = lat/lon/sog/cog/magVar
+//     else if( strcmp(GPS.thisSentence,"GGA") == 0 ) rVal = 3; // GGA = lat/lon/alt/qual/sats
+//     else rVal = 4;
 
-    // Now parse the message to get the data and store it in the GPS object
-    if( !GPS.parse(GPS.lastNMEA()) ) // parse() sets the newNMEAreceived() flag to false
-    {
-      return 1; // Failed to parse sentence -->  just wait for another
-    }
+//     // Now parse the message to get the data and store it in the GPS object
+//     if( !GPS.parse(GPS.lastNMEA()) ) // parse() sets the newNMEAreceived() flag to false
+//     {
+//       return 1; // Failed to parse sentence -->  just wait for another
+//     }
+//   }
+//   return rVal;
+// }
+int readGPS()
+{
+  int rVal = 0;
+
+  while (SerialGPS.available() > 0)
+  {
+    GPS.read();
   }
+
+  if (GPS.newNMEAreceived())
+  {
+    // NOTE: sentence tagging via GPS.thisSentence is library-version dependent.
+    // More robust is to just parse and then decide what you need based on fields updated.
+    if (!GPS.parse(GPS.lastNMEA()))
+      return 1;
+
+    // If you still want a return code, you can inspect GPS.lastNMEA() content.
+    // Example:
+    const char* nmea = GPS.lastNMEA();
+    if (strstr(nmea, "RMC")) rVal = 2;
+    else if (strstr(nmea, "GGA")) rVal = 3;
+    else rVal = 4;
+  }
+
   return rVal;
 }
 

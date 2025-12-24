@@ -163,8 +163,6 @@ public:
    */
   void update(uint32_t now_ms, bool navDataGood, float speedKF_mps, float distance_m, float speedGPS_mps)
   {
-    //_Serial->print("DragFSM::update() -> distance_m = "); _Serial->println(distance_m);
-
     // Select which speed source to use
     float speed_mps = speedKF_mps; // Use KF speed
     //float speed_mps = speedGPS_mps;  // Use GPS speed
@@ -283,13 +281,16 @@ public:
 
       case DRAG_RUNNING:
       {
-        _Serial->print("DRAG_RUNNING:");
-        _Serial->print(" time "); _Serial->print(elapsedSec(now_ms), 2);
-        _Serial->print(" KF_mph "); _Serial->print(speedKF_mph, 2);
-        _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mph, 2);
-        _Serial->print(" SPD_mph "); _Serial->print(speed_mph, 2);
-        _Serial->print(" Dist_ft "); _Serial->print(distanceRun_m*MTR2FT, 1);
-        _Serial->println("");
+        if( DEBUG2 )
+        {
+          _Serial->print("DRAG_RUNNING:");
+          _Serial->print(" time "); _Serial->print(elapsedSec(now_ms), 2);
+          _Serial->print(" KF_mph "); _Serial->print(speedKF_mph, 2);
+          _Serial->print(" GPS_mph "); _Serial->print(speedGPS_mph, 2);
+          _Serial->print(" SPD_mph "); _Serial->print(speed_mph, 2);
+          _Serial->print(" Dist_ft "); _Serial->print(distanceRun_m*MTR2FT, 1);
+          _Serial->println("");
+        }
 
         // Track max speed
         if (speed_mps > _dragLog.maxSpeed_mps)
@@ -462,6 +463,7 @@ public:
 
 private:
   bool DEBUG = false;
+  bool DEBUG2 = false;
 
   //==========================================================================================
   // Internal configuration (defaults match original intent)
