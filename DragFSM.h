@@ -293,13 +293,17 @@ public:
         }
         else
         {
-          PRINT = !PRINT;
-          if( PRINT )
-          {
-            _Serial->print("KF "); _Serial->print(speedKF_mph, 2);
-            _Serial->print(" GPS "); _Serial->print(speedGPS_mph, 2);
-            _Serial->println("");
-          }
+          // PRINT = !PRINT;
+          // if( PRINT )
+          // {
+          //   if( _Serial->availableForWrite() > 32 )
+          //   {
+          //     _Serial->print("Time "); _Serial->print(elapsedSec(now_ms), 2);
+          //     _Serial->print(" KF "); _Serial->print(speedKF_mph, 1);
+          //     _Serial->print(" GPS "); _Serial->print(speedGPS_mph, 1);
+          //     _Serial->println("");
+          //   }
+          // }
         }
 
         // Track max speed

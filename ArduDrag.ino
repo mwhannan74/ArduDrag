@@ -314,7 +314,7 @@ unsigned int minSatellites = 6;
 DragFSM _dragFSM(&Serial);
 
 bool DEBUG = false;
-bool TEST = true;
+bool TEST = false;
 uint32_t _testCnt = 0;
 float _testDist = 0.0f;
 
@@ -618,7 +618,7 @@ void loop()
       Serial.print(" etime_sec: "); Serial.print(etime_sec,5);
       Serial.print(" loopRate_Hz: "); Serial.println(loopRate_Hz);
     }
-    printGPS();
+    //printGPS();
   }
 
   //------------------------------------------------------------
