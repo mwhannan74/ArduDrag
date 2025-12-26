@@ -2,23 +2,17 @@
 
 ArduDrag is an Arduino/Teensy sketch that implements a GPS-based drag timer with basic sensor fusion. It takes raw NMEA data from an Adafruit GPS module, estimates distance and speed using a 1-D Kalman filter, and feeds those into a drag-race finite state machine (FSM) to detect launches and measure performance.
 
-The current code focuses on the GPS and filtering side; IMU integration was used in earlier iterations and can be added back later if needed.
-
 > Note: This project depends on `KalmanFilter.h` and `DragFSM.h`, which are part of this codebase but not shown in the snippet below. They are referenced throughout and described conceptually in this README.
 
 ---
 
 # GPS Speed Latency / High-Acceleration Accuracy Disclaimer
 
-This project uses an Adafruit “Ultimate GPS” (MTK33xx-class) NMEA receiver. Under steady-state conditions the reported speed (RMC SOG) is typically accurate, but **during rapid acceleration/deceleration the GPS-reported speed may lag the vehicle’s true instantaneous speed**. This behavior is consistent with known GNSS receiver characteristics: the module’s internal navigation solution applies filtering/smoothing and the NMEA stream can reflect a “time-of-validity” solution that is inherently delayed.
+This project uses an Adafruit “Ultimate GPS” (MTK33xx-class) NMEA receiver. I just happened to have it laying around from another project. However, it turns out to be a bad choice for this project. Under steady-state conditions the reported speed (RMC SOG) is typically accurate, but **during rapid acceleration/deceleration the GPS-reported speed may lag the vehicle’s true instantaneous speed**. The module’s internal navigation solution applies filtering/smoothing and the NMEA stream can reflect a “time-of-validity” solution that is inherently delayed. Basically, the GPS internal motion model used for filtering does not support high accelerations. It is likely setup up for more static (low acceleration) situations to help filter noise more effecitvely given its lower cost design and inteneded use cases. Implication is that peak speeds and short-interval acceleration metrics (e.g., 0–60, 60–130) may be **under-reported** when using GPS speed alone.   
 
-Additionally, **the configured NMEA output rate and the receiver’s internal fix/navigation update rate are not always the same**. Some modules can output NMEA at a higher rate than they update the underlying navigation solution, which can further increase apparent latency during transients.
+**The underlying code is well writen with attention paid to both the Kalman Filter and DragFSM code. Both can easily be adopted to different GPS modules and projects.**
 
-Implication: peak speeds and short-interval acceleration metrics (e.g., 0–60, 60–130) may be **under-reported** when using GPS speed alone.   
-
-The underlying code is well writen with excpetional attention paid to both the Kalman Filter and DragFSM code. Both can easily be adopted to different GPS modules and projects.
-
-A better GPS option would be the **SparkFun GPS Breakout - NEO-M9N, Chip Antenna**. This is a true 25Hz GPS and able to use binary messages over a high speed UART (921600 baud) for faster performance. You should swtich to using the UBX protocol and the UBX-NAV-PVT packet. UBX is an efficient, **binary protocol** and the UBX-NAV-PVT packet provides much more data than is available via NMEA. The additional data include North, East, and Down (NED) velocities; estimates of accuracy for horizontal and vertical position and velocity; and position dilution of precision (pDOP).
+A better GPS option would be the **SparkFun GPS Breakout - NEO-M9N**. This is a true uBlox 25Hz GPS and able to use binary messages over a high speed UART (921600 baud) for faster performance. **The Kalman Filter would not be needed with this GPS** as you would just be reling on the built in uBlox filter. You should switch to using the UBX protocol and the UBX-NAV-PVT packet. UBX is an efficient, **binary protocol** and the UBX-NAV-PVT packet provides much more data than is available via NMEA. The additional data include North, East, and Down (NED) velocities; estimates of accuracy for horizontal and vertical position and velocity; and position dilution of precision (pDOP). You will also want to set the dynamic model/platform to **Automotive**. The easiest integration would be to use SparkFun’s u-blox GNSS Arduino library. You should be able to find the basics in SparkFun’s Example1_AutoPVT.
 - https://www.sparkfun.com/sparkfun-gps-breakout-neo-m9n-chip-antenna-qwiic.html#content-features
 - https://learn.sparkfun.com/tutorials/sparkfun-gps-neo-m9n-hookup-guide
 
