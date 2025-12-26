@@ -18,6 +18,10 @@ Implication: peak speeds and short-interval acceleration metrics (e.g., 0–60, 
 
 The underlying code is well writen with excpetional attention paid to both the Kalman Filter and DragFSM code. Both can easily be adopted to different GPS modules and projects.
 
+A better GPS option would be the **SparkFun GPS Breakout - NEO-M9N, Chip Antenna**. This is a true 25Hz GPS and able to use binary messages over a high speed UART (921600 baud) for faster performance. You should swtich to using the UBX protocol and the UBX-NAV-PVT packet. UBX is an efficient, **binary protocol** and the UBX-NAV-PVT packet provides much more data than is available via NMEA. The additional data include North, East, and Down (NED) velocities; estimates of accuracy for horizontal and vertical position and velocity; and position dilution of precision (pDOP).
+- https://www.sparkfun.com/sparkfun-gps-breakout-neo-m9n-chip-antenna-qwiic.html#content-features
+- https://learn.sparkfun.com/tutorials/sparkfun-gps-neo-m9n-hookup-guide
+
 ---
 
 ## Features
