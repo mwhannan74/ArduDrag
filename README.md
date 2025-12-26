@@ -8,6 +8,18 @@ The current code focuses on the GPS and filtering side; IMU integration was used
 
 ---
 
+# GPS Speed Latency / High-Acceleration Accuracy Disclaimer
+
+This project uses an Adafruit “Ultimate GPS” (MTK33xx-class) NMEA receiver. Under steady-state conditions the reported speed (RMC SOG) is typically accurate, but **during rapid acceleration/deceleration the GPS-reported speed may lag the vehicle’s true instantaneous speed**. This behavior is consistent with known GNSS receiver characteristics: the module’s internal navigation solution applies filtering/smoothing and the NMEA stream can reflect a “time-of-validity” solution that is inherently delayed.
+
+Additionally, **the configured NMEA output rate and the receiver’s internal fix/navigation update rate are not always the same**. Some modules can output NMEA at a higher rate than they update the underlying navigation solution, which can further increase apparent latency during transients.
+
+Implication: peak speeds and short-interval acceleration metrics (e.g., 0–60, 60–130) may be **under-reported** when using GPS speed alone.   
+
+The underlying code is well writen with excpetional attention paid to both the Kalman Filter and DragFSM code. Both can easily be adopted to different GPS modules and projects.
+
+---
+
 ## Features
 
 - Uses an Adafruit GPS module (NMEA over UART) at 10 Hz.
