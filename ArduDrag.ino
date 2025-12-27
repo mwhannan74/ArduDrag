@@ -1,6 +1,7 @@
 #include <Adafruit_GPS.h>
 #include "KalmanFilter.h"
 #include "DragFSM.h"
+#include "GpsHelper.h"
 
 //============================================================================================
 // HELPER FUNCTIONS
@@ -71,66 +72,59 @@ void setupGPS()
 
   // Always request RMC + GGA (RMC = lat/lon/sog/cog/magVar, GGA = lat/lon/alt/qual/sats)
   GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+  delay(50);
  
   // Set the update rate to 10Hz
   GPS.sendCommand(PMTK_SET_NMEA_UPDATE_10HZ);
-  
-  delay(200);
-  //Serial.println("Completed GPS Setup");
+  delay(50);
+
+
+  // Try TO FIX ACCELERATION ISSUE
+  // Ensure we don't match a stale ACK
+  GpsHelper::flushGPS(SerialGPS);
+
+  // disable EASY
+  GPS.sendCommand("$PMTK869,1,0*34");
+  int flag869 = -1;
+  bool success869 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 869, 500, &flag869, true, true);
+  Serial.print("PMTK869 (EASY) success = "); Serial.println(success869);
+  if( !success869 ) {Serial.print("PMTK869 flag = "); Serial.println(flag869);} // 0 = invalid command, 1 = unsupported command, 2 = valid command, but failed, 3 = valid command, succeeded
+
+  // avionic (high dynamic)
+  GPS.sendCommand("$PMTK886,2*2A");
+  int flag886 = -1;
+  bool success886 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 886, 500, &flag886, true, true);
+  Serial.print("PMTK886 (avionic) success = "); Serial.println(success886);
+  if( !success886 ) {Serial.print("PMTK886 flag = "); Serial.println(flag886);}
 }
 
 // Read data from the GPS serial port in the 'main loop'.
 // Need to call as fast as possible as the GPS.read() only reads one character at at time from the serial port.
 // Returns an int value that corresponds to parsing result: NA=0, FAIL=1, RMC=2, GGA=3, OTHER=4
-// int readGPS()
-// {  
-//   int rVal = 0;  // NA --> no new sentence parsed
-
-//   // reads one character from the GPS serial stream and feeds it into the library’s internal NMEA sentence buffer
-//   GPS.read();
-  
-//   // Check if  NMEA message is ready to parse
-//   if( GPS.newNMEAreceived() ) 
-//   {
-//     // full NMEA sentence has been received and is read to be parsed --> NEW DATA    
-//     if( strcmp(GPS.thisSentence,"RMC") == 0 ) rVal = 2;      // RMC = lat/lon/sog/cog/magVar
-//     else if( strcmp(GPS.thisSentence,"GGA") == 0 ) rVal = 3; // GGA = lat/lon/alt/qual/sats
-//     else rVal = 4;
-
-//     // Now parse the message to get the data and store it in the GPS object
-//     if( !GPS.parse(GPS.lastNMEA()) ) // parse() sets the newNMEAreceived() flag to false
-//     {
-//       return 1; // Failed to parse sentence -->  just wait for another
-//     }
-//   }
-//   return rVal;
-// }
 int readGPS()
-{
-  int rVal = 0;
+{  
+  int rVal = 0;  // NA --> no new sentence parsed
 
-  while (SerialGPS.available() > 0)
+  // reads one character from the GPS serial stream and feeds it into the library’s internal NMEA sentence buffer
+  GPS.read();
+  
+  // Check if  NMEA message is ready to parse
+  if( GPS.newNMEAreceived() ) 
   {
-    GPS.read();
-  }
-
-  if (GPS.newNMEAreceived())
-  {
-    // NOTE: sentence tagging via GPS.thisSentence is library-version dependent.
-    // More robust is to just parse and then decide what you need based on fields updated.
-    if (!GPS.parse(GPS.lastNMEA()))
-      return 1;
-
-    // If you still want a return code, you can inspect GPS.lastNMEA() content.
-    // Example:
-    const char* nmea = GPS.lastNMEA();
-    if (strstr(nmea, "RMC")) rVal = 2;
-    else if (strstr(nmea, "GGA")) rVal = 3;
+    // full NMEA sentence has been received and is read to be parsed --> NEW DATA    
+    if( strcmp(GPS.thisSentence,"RMC") == 0 ) rVal = 2;      // RMC = lat/lon/sog/cog/magVar
+    else if( strcmp(GPS.thisSentence,"GGA") == 0 ) rVal = 3; // GGA = lat/lon/alt/qual/sats
     else rVal = 4;
-  }
 
+    // Now parse the message to get the data and store it in the GPS object
+    if( !GPS.parse(GPS.lastNMEA()) ) // parse() sets the newNMEAreceived() flag to false
+    {
+      return 1; // Failed to parse sentence -->  just wait for another
+    }
+  }
   return rVal;
 }
+
 
 void printGPS()
 {
@@ -185,7 +179,6 @@ void printGPS()
 //============================================================================================
 // GPS HELPER FUNCTIONS
 //============================================================================================
-
 // Haversine distance between two lat/lon points in meters
 float haversineDistance_m(float lat1_deg, float lon1_deg, float lat2_deg, float lon2_deg)
 {
@@ -618,7 +611,7 @@ void loop()
       Serial.print(" etime_sec: "); Serial.print(etime_sec,5);
       Serial.print(" loopRate_Hz: "); Serial.println(loopRate_Hz);
     }
-    //printGPS();
+    printGPS();
   }
 
   //------------------------------------------------------------
