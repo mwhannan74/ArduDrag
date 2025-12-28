@@ -1,7 +1,6 @@
 #include <Adafruit_GPS.h>
 #include "KalmanFilter.h"
 #include "DragFSM.h"
-#include "GpsHelper.h"
 
 //============================================================================================
 // HELPER FUNCTIONS
@@ -51,116 +50,160 @@ const char* GpsFixQuality(uint8_t q)
   }
 }
 
+// Purge (drain) everything currently buffered on the Teensy's UART RX
+static void purgeSerialGPS(HardwareSerial& gps)
+{
+  while (gps.available() > 0)
+  {
+    (void)gps.read();
+  }
+}
+
+// !!! THIS CAN ONLY BE USED DURING SETUP() !!!
+// Read and print complete lines from the GPS for a fixed duration.
+// Used to ensure that ACKs from commands are properly parsed.
+// - Captures lines that start with '$' and end with '\n'
+// - Strips '\r'
+// - Prints only complete lines (no per-character printing)
+// - Also counts how many full lines were printed
+static uint32_t printGpsLinesForMs(usb_serial_class& usb,
+                                  HardwareSerial& gps,
+                                  uint32_t duration_ms,
+                                  bool requireDollarStart = true)
+{
+  char line[160];               // NMEA lines are typically < 120 chars
+  size_t idx = 0;
+  bool inLine = !requireDollarStart;
+
+  uint32_t printed = 0;
+  uint32_t start = millis();
+
+  while (millis() - start < duration_ms)
+  {
+    while (gps.available() > 0)
+    {
+      char c = (char)gps.read();
+
+      if (c == '\r') continue;
+
+      if (!inLine)
+      {
+        if (c == '$')
+        {
+          inLine = true;
+          idx = 0;
+          line[idx++] = '$';
+        }
+        continue;
+      }
+
+      if (c == '\n')
+      {
+        line[idx] = '\0';
+        usb.println(line);
+        printed++;
+
+        // Reset for next line
+        idx = 0;
+        inLine = !requireDollarStart;
+        continue;
+      }
+
+      if (idx < sizeof(line) - 1)
+      {
+        line[idx++] = c;
+      }
+      else
+      {
+        // Overflow: terminate and print what we have, then resync to next line
+        line[sizeof(line) - 1] = '\0';
+        usb.println(line);
+        printed++;
+
+        idx = 0;
+        inLine = !requireDollarStart;
+      }
+    }
+  }
+
+  return printed;
+}
+
+
 void setupGPS()
 {
   Serial.println("=======================================");
   Serial.println("Setting Up GPS");
 
-  // increase buffer size on Teensy 3.2 so occasional USB serial stalls don’t cost bytes
+  // Up the Teensy's buffer size
   Serial1.addMemoryForRead(gps_rx_buffer, sizeof(gps_rx_buffer));
 
-  // UART bring-up / baud switch
+  //-----------------------------------------------------
+  // Start at default baud
   SerialGPS.begin(9600);
   delay(200);
 
+  // Switch GPS baud to 57600
   GPS.sendCommand(PMTK_SET_BAUD_57600);
-  delay(150);           // give GPS a moment to switch
+
+  // Give GPS time to apply baud, then switch MCU UART
+  delay(150);
   SerialGPS.end();
-  delay(20);
+  delay(50);
   SerialGPS.begin(57600);
+  delay(500); // important to be this long
+
+  // ------------------------------------------------------------------
+  // Quiet stream: disable all NMEA output
+  GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_OFF);
+  delay(500); // important to be this long
+
+  // Remove any characters in the GPS serial buffer  
+  purgeSerialGPS(SerialGPS);
+
+  // ------------------------------------------------------------------
+  // Disable EASY
+  // We disable EASY so the GPS isn’t using its “assist/prediction” feature that can interfere with or behave unpredictably at higher update rates.
+  // Successs = $PMTK001,869,3*37 --> it is the 3 before checksum *34 that we are looking for (0 = invalid command, 1 = unsupported command, 2 = valid command but failed, 3 = valid command and succeeded)
+  Serial.println("Disable EASY -> Looking for ACK = $PMTK001,869,3*37");  
+  GPS.sendCommand("$PMTK869,1,0*34");  
   delay(50);
 
-  // IMPORTANT: do not print per-character during ACK waits
-  const bool ECHO = false;
-  const bool READABLE = true; // irrelevant when ECHO=false
-  const uint32_t TMO = 800;
+  Serial.println("Dumping GPS lines for 1 seconds...");
+  uint32_t n = printGpsLinesForMs(Serial, SerialGPS, 1000);
 
-  int flag314=-1, flag869=-1, flag886=-1;
+  // ------------------------------------------------------------------
+  // Set AVIONIC (high dynamic)
+  // We set AVIONIC mode so the receiver uses a navigation dynamics model tuned for higher accelerations and rapid speed/heading changes.
+  // This reduces the chance that internal smoothing/limits make the reported speed lag during hard pulls (acceleration limited).
+  // Success = $PMTK001,886,3*36 --> it is the 3 before checksum *36 that we are looking for (0 = invalid command, 1 = unsupported command, 2 = valid command but failed, 3 = valid command and succeeded)
+  Serial.println("Set AVIONIC (high dynamic) -> Looking for ACK = $PMTK001,886,3*36");  
+  GPS.sendCommand("$PMTK886,2*2A"); 
+  delay(50);
 
-  // Quiet stream: disable all NMEA sentences (PMTK314 all zeros)
-  // This is more deterministic than relying on library macros.
-  GpsHelper::flushGPS(SerialGPS);
-  GPS.sendCommand("$PMTK314,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28");
-  bool ok314 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 314, TMO, &flag314, ECHO, READABLE);
+  Serial.println("Dumping GPS lines for 1 seconds...");
+  n = printGpsLinesForMs(Serial, SerialGPS, 1000);
 
-  // Disable EASY
-  GpsHelper::flushGPS(SerialGPS);
-  GPS.sendCommand("$PMTK869,1,0*34");
-  bool ok869 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 869, TMO, &flag869, ECHO, READABLE);
-
-  // Avionic
-  GpsHelper::flushGPS(SerialGPS);
-  GPS.sendCommand("$PMTK886,2*2A");
-  bool ok886 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 886, TMO, &flag886, ECHO, READABLE);
-
-  // Re-enable desired output + rate
+  //-----------------------------------------------------
+  // Restore normal output + rate
   GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-  GPS.sendCommand(PMTK_SET_NMEA_UPDATE_10HZ);
+  delay(50);
 
-  // Print once at the end (safe)
+  // Serial.println("Dumping GPS lines for 1 seconds...");
+  // n = printGpsLinesForMs(Serial, SerialGPS, 1000);
+
+  GPS.sendCommand(PMTK_SET_NMEA_UPDATE_10HZ);
+  delay(50);
+
+  // Serial.println("Dumping GPS lines for 1 seconds...");
+  // n = printGpsLinesForMs(Serial, SerialGPS, 1000);
+
   Serial.println("Completed GPS Setup");
-  Serial.println("--- GPS SETUP SUMMARY ---");
-  Serial.printf("PMTK314 quiet stream ok=%d flag=%d\n", ok314, flag314);
-  Serial.printf("PMTK869 EASY disable ok=%d flag=%d\n", ok869, flag869);
-  Serial.printf("PMTK886 avionic ok=%d flag=%d\n", ok886, flag886);
   Serial.println("=======================================");
 }
 
 
-// void setupGPS()
-// {
-//   Serial.println("=======================================");
-//   Serial.println("Setting Up GPS");  
 
-//   //------------------------------------------------------------------------  
-//   // defualt GPS baud rate is 9600
-//   SerialGPS.begin(9600);
-//   delay(200);
-
-//   // Change GPS to 57600 baud rate for robustness using 2 NMEA messages.
-//   GPS.sendCommand(PMTK_SET_BAUD_57600);
-//   SerialGPS.end();
-//   delay(50);  
-//   SerialGPS.begin(57600);
-//   delay(50);
-
-//   // Disable all output to quiet the stream output
-//   GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_OFF);
-//   delay(50);
-
-//   // Ensure we don't match a stale ACK
-//   //GpsHelper::flushGPS(SerialGPS);
-
-
-//   //------------------------------------------------------------------------
-//   // FIX ACCELERATION ISSUE
-//   // disable EASY
-//   GPS.sendCommand("$PMTK869,1,0*34");
-//   int flag869 = -1;
-//   bool success869 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 869, 500, &flag869, false, true);
-//   Serial.print("PMTK869 (EASY) success = "); Serial.println(success869);
-//   if( !success869 ) {Serial.print("PMTK869 flag = "); Serial.println(flag869);} // 0 = invalid command, 1 = unsupported command, 2 = valid command, but failed, 3 = valid command, succeeded
-
-//   // avionic (high dynamic)
-//   GPS.sendCommand("$PMTK886,2*2A");
-//   int flag886 = -1;
-//   bool success886 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 886, 500, &flag886, true, true);
-//   Serial.print("PMTK886 (avionic) success = "); Serial.println(success886);
-//   if( !success886 ) {Serial.print("PMTK886 flag = "); Serial.println(flag886);}
-
-
-//   //------------------------------------------------------------------------
-//   // Always request RMC + GGA (RMC = lat/lon/sog/cog/magVar, GGA = lat/lon/alt/qual/sats)
-//   GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-//   delay(50);
- 
-//   // Set the update rate to 10Hz
-//   GPS.sendCommand(PMTK_SET_NMEA_UPDATE_10HZ);
-//   delay(50);
-
-//   Serial.println("Completed GPS Setup");
-//   Serial.println("=======================================");
-// }
 
 // Read data from the GPS serial port in the 'main loop'.
 // Need to call as fast as possible as the GPS.read() only reads one character at at time from the serial port.
