@@ -31,7 +31,7 @@ bool _ledOn = true;
 // Adafruit Ultimate GPS 
 //============================================================================================
 #define SerialGPS Serial1 // rename for convenience
-static uint8_t gps_rx_buffer[512];
+static uint8_t gps_rx_buffer[1024];
 
 Adafruit_GPS GPS(&SerialGPS);
 const char* GpsFixQuality(uint8_t q)
@@ -141,17 +141,20 @@ void setupGPS()
 
   //-----------------------------------------------------
   // Start at default baud
-  SerialGPS.begin(9600);
+  //SerialGPS.begin(9600);
+  SerialGPS.begin(57600);
   delay(200);
 
   // Switch GPS baud to 57600
-  GPS.sendCommand(PMTK_SET_BAUD_57600);
+  //GPS.sendCommand(PMTK_SET_BAUD_57600);
+  GPS.sendCommand(PMTK_SET_BAUD_115200);  
 
   // Give GPS time to apply baud, then switch MCU UART
   delay(150);
   SerialGPS.end();
   delay(50);
-  SerialGPS.begin(57600);
+  //SerialGPS.begin(57600);
+  SerialGPS.begin(115200);
   delay(500); // important to be this long
 
   // ------------------------------------------------------------------
@@ -180,6 +183,7 @@ void setupGPS()
   // Success = $PMTK001,886,3*36 --> it is the 3 before checksum *36 that we are looking for (0 = invalid command, 1 = unsupported command, 2 = valid command but failed, 3 = valid command and succeeded)
   Serial.println("Set AVIONIC (high dynamic) -> Looking for ACK = $PMTK001,886,3*36");  
   GPS.sendCommand("$PMTK886,2*2A"); 
+  //GPS.sendCommand("$PMTK886,0*28"); // normal
   delay(50);
 
   Serial.println("Dumping GPS lines for 1 seconds...");
@@ -203,36 +207,37 @@ void setupGPS()
   Serial.println("=======================================");
 }
 
+void readGPS(bool& sawGGA, bool& sawRMC)
+{
+  sawGGA = false;
+  sawRMC = false;
 
-
-
-// Read data from the GPS serial port in the 'main loop'.
-// Need to call as fast as possible as the GPS.read() only reads one character at at time from the serial port.
-// Returns an int value that corresponds to parsing result: NA=0, FAIL=1, RMC=2, GGA=3, OTHER=4
-int readGPS()
-{  
-  int rVal = 0;  // NA --> no new sentence parsed
-
-  // reads one character from the GPS serial stream and feeds it into the library’s internal NMEA sentence buffer
-  GPS.read();
-  
-  // Check if  NMEA message is ready to parse
-  if( GPS.newNMEAreceived() ) 
+  while (SerialGPS.available() > 0)
   {
-    // full NMEA sentence has been received and is read to be parsed --> NEW DATA    
-    if( strcmp(GPS.thisSentence,"RMC") == 0 ) rVal = 2;      // RMC = lat/lon/sog/cog/magVar
-    else if( strcmp(GPS.thisSentence,"GGA") == 0 ) rVal = 3; // GGA = lat/lon/alt/qual/sats
-    else rVal = 4;
+    GPS.read();
 
-    // Now parse the message to get the data and store it in the GPS object
-    if( !GPS.parse(GPS.lastNMEA()) ) // parse() sets the newNMEAreceived() flag to false
-    {
-      return 1; // Failed to parse sentence -->  just wait for another
-    }
+    if (!GPS.newNMEAreceived())
+      continue;
+
+    char* nmea = GPS.lastNMEA();
+    if (!nmea) continue;
+
+    // RESYNC: if junk precedes '$', parse from '$'
+    char* s = strchr(nmea, '$');
+    if (!s) continue;
+    nmea = s;
+
+    // Fast, unambiguous sentence ID check (at the start, not substring-anywhere)
+    bool isRMC = (strncmp(nmea, "$GPRMC", 6) == 0) || (strncmp(nmea, "$GNRMC", 6) == 0);
+    bool isGGA = (strncmp(nmea, "$GPGGA", 6) == 0) || (strncmp(nmea, "$GNGGA", 6) == 0);
+
+    if (!GPS.parse(nmea))
+      continue;
+
+    if (isRMC) sawRMC = true;
+    if (isGGA) sawGGA = true;   // not else-if; harmless and avoids edge cases
   }
-  return rVal;
 }
-
 
 void printGPS()
 {
@@ -397,7 +402,7 @@ uint32_t _timeLED_ms     = millis();
 uint32_t _timeProcess_ms = millis();
 uint32_t _timeKF_ms      = millis();
 uint32_t _timePrint_ms   = millis();
-uint32_t _time_RMC_ms    = millis();
+uint32_t _time_RMC_ms    = 0;
 
 bool _isFirstTime = true;
 bool _haveGpsFixInfo = false;
@@ -415,7 +420,7 @@ unsigned int minSatellites = 6;
 DragFSM _dragFSM(&Serial);
 
 bool DEBUG = false;
-bool TEST = false;
+bool TEST = true;
 uint32_t _testCnt = 0;
 float _testDist = 0.0f;
 
@@ -448,7 +453,9 @@ void loop()
   
   //------------------------------------------------------------
   // Parse GPS continuously
-  int gpsRes = readGPS(); // NA=0, FAIL=1, RMC=2, GGA=3, OTHER=4
+  bool sawGGA;
+  bool sawRMC;
+  readGPS(sawGGA, sawRMC);
 
   //------------------------------------------------------------  
   // Only run processing if we have a GPS fix
@@ -456,7 +463,7 @@ void loop()
   {
     // Did we get sat fix info yet? 
     // gpsRes = 3 = GGA --> satillite information
-    if( gpsRes == 3 && !_haveGpsFixInfo )
+    if( sawGGA && !_haveGpsFixInfo )
     {
       _haveGpsFixInfo = true;
     }
@@ -470,21 +477,30 @@ void loop()
     // KF update only on new RMC message (RMC has lat, lon, and SOG)
     // Event driven with a rate around 10Hz 
     //===============================================================
-    if( gpsRes == 2 )
+    if( sawRMC )
     {   
       if(DEBUG) Serial.println("=== RMC Message Received ==="); 
-      
-      // how much time has passed since last RMC message
-      uint32_t time_since_last_RMC_ms = _time_ms - _time_RMC_ms;
-      float time_since_last_RMC_sec = (float)time_since_last_RMC_ms / 1000.0f;
-      float freq_since_last_RMC_sec = 0.0;
-      if(time_since_last_RMC_sec > 0.0) freq_since_last_RMC_sec = 1.0f / time_since_last_RMC_sec;
 
-      _time_RMC_ms = _time_ms;
-      if(DEBUG) 
+      if (_time_RMC_ms == 0) 
       {
-        Serial.print("time_since_last_RMC_ms = "); Serial.println(time_since_last_RMC_ms);
-        Serial.print("freq_since_last_RMC_sec = "); Serial.println(freq_since_last_RMC_sec);
+        _time_RMC_ms = _time_ms;
+      } 
+      else 
+      {
+        uint32_t dt_ms = _time_ms - _time_RMC_ms;
+        _time_RMC_ms = _time_ms;
+
+        float dt_sec = dt_ms / 1000.0f;
+        float freq_hz = (dt_sec > 0.0f) ? (1.0f / dt_sec) : 0.0f;
+
+        if(DEBUG)
+        {
+          Serial.print("time_since_last_RMC_ms = ");
+          Serial.println(dt_ms);
+          Serial.print("GMT seconds.milliseconds = "); Serial.print(GPS.seconds); Serial.print("."); Serial.println(GPS.milliseconds);
+          //Serial.print(" freq_since_last_RMC_sec = ");
+          //Serial.println(freq_hz);
+        }
       }
 
 

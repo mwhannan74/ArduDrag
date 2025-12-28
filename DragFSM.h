@@ -68,6 +68,12 @@ public:
     float    maxSpeed_mps = 0.0f;
 
     // 1) 0–60 mph time, mph, and distance
+    bool  has_0_30   = false;
+    float t_0_30_sec = 0.0f;
+    float v_0_30_mps = 0.0f;
+    float d_0_30_m   = 0.0f;
+
+    // 1) 0–60 mph time, mph, and distance
     bool  has_0_60   = false;
     float t_0_60_sec = 0.0f;
     float v_0_60_mps = 0.0f;
@@ -122,8 +128,12 @@ public:
   static constexpr float QTR_MILE_IN_FT  = DIST_1320FT_FT;
   static constexpr float QTR_MILE_IN_MTR = DIST_1320FT_FT / MTR2FT;  
 
+  static constexpr float TARGET_30_MPH = 30.0f;
+  static constexpr float TARGET_30_MPS = TARGET_30_MPH / MPS2MPH;
+
   static constexpr float TARGET_60_MPH = 60.0f;
   static constexpr float TARGET_60_MPS = TARGET_60_MPH / MPS2MPH;
+
 
   //==========================================================================================
   // Construction / setup
@@ -293,23 +303,44 @@ public:
         }
         else
         {
-          // PRINT = !PRINT;
-          // if( PRINT )
-          // {
-          //   if( _Serial->availableForWrite() > 32 )
-          //   {
-          //     _Serial->print("Time "); _Serial->print(elapsedSec(now_ms), 2);
-          //     _Serial->print(" KF "); _Serial->print(speedKF_mph, 1);
-          //     _Serial->print(" GPS "); _Serial->print(speedGPS_mph, 1);
-          //     _Serial->println("");
-          //   }
-          // }
+          PRINT = !PRINT;
+          if( PRINT )
+          {
+            if( _Serial->availableForWrite() > 32 )
+            {
+              _Serial->print("Time "); _Serial->print(elapsedSec(now_ms), 2);
+              _Serial->print(" KF "); _Serial->print(speedKF_mph, 1);
+              _Serial->print(" GPS "); _Serial->print(speedGPS_mph, 1);
+              _Serial->println("");
+            }
+          }
         }
 
         // Track max speed
         if (speed_mps > _dragLog.maxSpeed_mps)
         {
           _dragLog.maxSpeed_mps = speed_mps;
+        }
+
+        // 1) 0-30 mph timing
+        if (!_dragLog.has_0_30 && (speed_mps >= TARGET_30_MPS))
+        {
+          // EVENT: Reached 30 mph (early exit for testing)
+          //_dragStatus.state = DRAG_FINISHED;
+
+          // data
+          _dragLog.has_0_30   = true;
+          _dragLog.t_0_30_sec = elapsedSec(now_ms);
+          _dragLog.v_0_30_mps = speed_mps;
+          _dragLog.d_0_30_m   = distanceRun_m;  // capture distance at 30 mph
+
+          _Serial->println("**************************************************************");
+          _Serial->print("-> 0-"); _Serial->print(TARGET_30_MPH,0); _Serial->print(" mph in ");
+          _Serial->print(_dragLog.t_0_30_sec, 3);
+          _Serial->print(" sec, dist = ");
+          _Serial->print(_dragLog.d_0_30_m * MTR2FT);
+          _Serial->println(" ft");
+          _Serial->println("**************************************************************");
         }
 
         // 1) 0-60 mph timing
@@ -559,6 +590,9 @@ private:
     _Serial->println("==============================================================");
     _Serial->println("TIME SLIP: ");
     
+    _Serial->print("0-30  ... "); _Serial->println(_dragLog.has_0_30 ? _dragLog.t_0_30_sec : -1.0f, 3);
+    _Serial->print("DIST  ... "); _Serial->println(_dragLog.has_0_30 ? _dragLog.d_0_30_m*MTR2FT : -1.0f, 1);
+
     _Serial->print("0-60  ... "); _Serial->println(_dragLog.has_0_60 ? _dragLog.t_0_60_sec : -1.0f, 3);
     _Serial->print("DIST  ... "); _Serial->println(_dragLog.has_0_60 ? _dragLog.d_0_60_m*MTR2FT : -1.0f, 1);
 
