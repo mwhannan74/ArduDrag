@@ -32,6 +32,7 @@ bool _ledOn = true;
 // Adafruit Ultimate GPS 
 //============================================================================================
 #define SerialGPS Serial1 // rename for convenience
+static uint8_t gps_rx_buffer[512];
 
 Adafruit_GPS GPS(&SerialGPS);
 const char* GpsFixQuality(uint8_t q)
@@ -52,51 +53,114 @@ const char* GpsFixQuality(uint8_t q)
 
 void setupGPS()
 {
-  //Serial.println("Setting Up GPS");  
+  Serial.println("=======================================");
+  Serial.println("Setting Up GPS");
 
-  // Having issues reliably connecting to GPS
-  bool initConnectWithDefaultBaud = true;
-  if( initConnectWithDefaultBaud )
-  {
-    // defualt GPS baud rate is 9600
-    SerialGPS.begin(9600);
-    delay(500);
+  // increase buffer size on Teensy 3.2 so occasional USB serial stalls don’t cost bytes
+  Serial1.addMemoryForRead(gps_rx_buffer, sizeof(gps_rx_buffer));
 
-    // Change GPS to 57600 baud rate for robustness using 2 NMEA messages.
-    GPS.sendCommand(PMTK_SET_BAUD_57600);
-    SerialGPS.end();
-    delay(500);  
-  }
+  // UART bring-up / baud switch
+  SerialGPS.begin(9600);
+  delay(200);
+
+  GPS.sendCommand(PMTK_SET_BAUD_57600);
+  delay(150);           // give GPS a moment to switch
+  SerialGPS.end();
+  delay(20);
   SerialGPS.begin(57600);
-  delay(500);
-
-  // Always request RMC + GGA (RMC = lat/lon/sog/cog/magVar, GGA = lat/lon/alt/qual/sats)
-  GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-  delay(50);
- 
-  // Set the update rate to 10Hz
-  GPS.sendCommand(PMTK_SET_NMEA_UPDATE_10HZ);
   delay(50);
 
+  // IMPORTANT: do not print per-character during ACK waits
+  const bool ECHO = false;
+  const bool READABLE = true; // irrelevant when ECHO=false
+  const uint32_t TMO = 800;
 
-  // Try TO FIX ACCELERATION ISSUE
-  // Ensure we don't match a stale ACK
+  int flag314=-1, flag869=-1, flag886=-1;
+
+  // Quiet stream: disable all NMEA sentences (PMTK314 all zeros)
+  // This is more deterministic than relying on library macros.
   GpsHelper::flushGPS(SerialGPS);
+  GPS.sendCommand("$PMTK314,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28");
+  bool ok314 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 314, TMO, &flag314, ECHO, READABLE);
 
-  // disable EASY
+  // Disable EASY
+  GpsHelper::flushGPS(SerialGPS);
   GPS.sendCommand("$PMTK869,1,0*34");
-  int flag869 = -1;
-  bool success869 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 869, 500, &flag869, true, true);
-  Serial.print("PMTK869 (EASY) success = "); Serial.println(success869);
-  if( !success869 ) {Serial.print("PMTK869 flag = "); Serial.println(flag869);} // 0 = invalid command, 1 = unsupported command, 2 = valid command, but failed, 3 = valid command, succeeded
+  bool ok869 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 869, TMO, &flag869, ECHO, READABLE);
 
-  // avionic (high dynamic)
+  // Avionic
+  GpsHelper::flushGPS(SerialGPS);
   GPS.sendCommand("$PMTK886,2*2A");
-  int flag886 = -1;
-  bool success886 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 886, 500, &flag886, true, true);
-  Serial.print("PMTK886 (avionic) success = "); Serial.println(success886);
-  if( !success886 ) {Serial.print("PMTK886 flag = "); Serial.println(flag886);}
+  bool ok886 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 886, TMO, &flag886, ECHO, READABLE);
+
+  // Re-enable desired output + rate
+  GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+  GPS.sendCommand(PMTK_SET_NMEA_UPDATE_10HZ);
+
+  // Print once at the end (safe)
+  Serial.println("Completed GPS Setup");
+  Serial.println("--- GPS SETUP SUMMARY ---");
+  Serial.printf("PMTK314 quiet stream ok=%d flag=%d\n", ok314, flag314);
+  Serial.printf("PMTK869 EASY disable ok=%d flag=%d\n", ok869, flag869);
+  Serial.printf("PMTK886 avionic ok=%d flag=%d\n", ok886, flag886);
+  Serial.println("=======================================");
 }
+
+
+// void setupGPS()
+// {
+//   Serial.println("=======================================");
+//   Serial.println("Setting Up GPS");  
+
+//   //------------------------------------------------------------------------  
+//   // defualt GPS baud rate is 9600
+//   SerialGPS.begin(9600);
+//   delay(200);
+
+//   // Change GPS to 57600 baud rate for robustness using 2 NMEA messages.
+//   GPS.sendCommand(PMTK_SET_BAUD_57600);
+//   SerialGPS.end();
+//   delay(50);  
+//   SerialGPS.begin(57600);
+//   delay(50);
+
+//   // Disable all output to quiet the stream output
+//   GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_OFF);
+//   delay(50);
+
+//   // Ensure we don't match a stale ACK
+//   //GpsHelper::flushGPS(SerialGPS);
+
+
+//   //------------------------------------------------------------------------
+//   // FIX ACCELERATION ISSUE
+//   // disable EASY
+//   GPS.sendCommand("$PMTK869,1,0*34");
+//   int flag869 = -1;
+//   bool success869 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 869, 500, &flag869, false, true);
+//   Serial.print("PMTK869 (EASY) success = "); Serial.println(success869);
+//   if( !success869 ) {Serial.print("PMTK869 flag = "); Serial.println(flag869);} // 0 = invalid command, 1 = unsupported command, 2 = valid command, but failed, 3 = valid command, succeeded
+
+//   // avionic (high dynamic)
+//   GPS.sendCommand("$PMTK886,2*2A");
+//   int flag886 = -1;
+//   bool success886 = GpsHelper::waitForPMTKAck(Serial, SerialGPS, 886, 500, &flag886, true, true);
+//   Serial.print("PMTK886 (avionic) success = "); Serial.println(success886);
+//   if( !success886 ) {Serial.print("PMTK886 flag = "); Serial.println(flag886);}
+
+
+//   //------------------------------------------------------------------------
+//   // Always request RMC + GGA (RMC = lat/lon/sog/cog/magVar, GGA = lat/lon/alt/qual/sats)
+//   GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+//   delay(50);
+ 
+//   // Set the update rate to 10Hz
+//   GPS.sendCommand(PMTK_SET_NMEA_UPDATE_10HZ);
+//   delay(50);
+
+//   Serial.println("Completed GPS Setup");
+//   Serial.println("=======================================");
+// }
 
 // Read data from the GPS serial port in the 'main loop'.
 // Need to call as fast as possible as the GPS.read() only reads one character at at time from the serial port.
