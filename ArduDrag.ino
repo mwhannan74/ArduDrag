@@ -134,6 +134,7 @@ void setupGPS()
 {
   Serial.println("=======================================");
   Serial.println("Setting Up GPS");
+  delay(1000); // need for power cycle to not corrupt ACK messages
 
   // Up the Teensy's buffer size
   Serial1.addMemoryForRead(gps_rx_buffer, sizeof(gps_rx_buffer));
